@@ -6,52 +6,127 @@
 #include <span>
 #include "mio/mmap.hpp"
 #include <iostream>
+#include <vector>
+#include <variant>
+#include <filesystem>
+#include <fstream>
 
-class MyGridTable : public wxGridTableBase {
+namespace fs = std::filesystem;
+
+using char_buf = std::array<char, 64>;
+
+enum class ColumnType : uint8_t {
+    INT32  = 0,
+    DOUBLE = 1,
+    CHARBUF = 2
+};
+
+using Column = std::variant<
+    std::span<const int32_t>,
+    std::span<const double>,
+    std::span<const char_buf>
+>;
+
+class MmappedTable : public wxGridTableBase {
 public:
-    static constexpr int ROWS = 100000000;
-    static constexpr int COLS = 10;
+    MmappedTable(const std::string& dirPath) {
+        auto metaPath = fs::path(dirPath) / "metadata.bin";
+        std::ifstream meta(metaPath, std::ios::binary);
+        if (!meta)
+            throw std::runtime_error("Failed to open metadata: " + metaPath.string());
 
+        int32_t numCols;
+        meta.read(reinterpret_cast<char*>(&numCols), sizeof(numCols));
+        if (!meta)
+            throw std::runtime_error("Failed to read number of columns");
 
-    MyGridTable(std::string path) {
-        mmap = mio::mmap_source(path);
-        if(!mmap.is_open()) {
-            throw std::runtime_error("Failed to open file: " + path);
+        std::vector<ColumnType> types(numCols);
+        meta.read(reinterpret_cast<char*>(types.data()), numCols * sizeof(ColumnType));
+        if (!meta)
+            throw std::runtime_error("Failed to read column type list");
+
+        for (int i = 0; i < numCols; ++i) {
+            auto colPath = fs::path(dirPath) / (std::to_string(i) + ".bin");
+
+            mio::mmap_source mmap(colPath.string());
+            if (!mmap.is_open())
+                throw std::runtime_error("Failed to mmap: " + colPath.string());
+
+            colMmappers.emplace_back(std::move(mmap));
+            const auto& mmapRef = colMmappers.back();
+
+            const char* data = mmapRef.data();
+            size_t bytes = mmapRef.size();
+
+            switch (types[i]) {
+                case ColumnType::INT32: {
+                    size_t n = bytes / sizeof(int32_t);
+                    auto ptr = reinterpret_cast<const int32_t*>(data);
+                    cols.emplace_back(std::span<const int32_t>(ptr, n));
+                    rows = n;
+                    break;
+                }
+                case ColumnType::DOUBLE: {
+                    size_t n = bytes / sizeof(double);
+                    auto ptr = reinterpret_cast<const double*>(data);
+                    cols.emplace_back(std::span<const double>(ptr, n));
+                    rows = n;
+                    break;
+                }
+                case ColumnType::CHARBUF: {
+                    size_t n = bytes / sizeof(char_buf);
+                    auto ptr = reinterpret_cast<const char_buf*>(data);
+                    cols.emplace_back(std::span<const char_buf>(ptr, n));
+                    rows = n;
+                    break;
+                }
+                default:
+                    throw std::runtime_error("Unknown column type code");
+            }
         }
 
-        rows = mmap.size() / sizeof(int32_t);
-        auto ptr = reinterpret_cast<const int32_t*>(mmap.data()); 
-        col = std::span<const int32_t>(ptr, rows);
+        this->numCols = numCols;
     }
 
-    int GetNumberRows() override { return ROWS; }
-    int GetNumberCols() override { return COLS; }
+    int GetNumberRows() override { return 1000'000'000; }
+    int GetNumberCols() override { return 3; }
 
-    bool IsEmptyCell(int rowIdx, int colIdx) override { 
-        return false; 
+    bool IsEmptyCell(int row, int col) override {
+        return row >= rows || col >= numCols;
     }
 
-    wxString GetValue(int rowIdx, int colIdx) override { 
-        return wxString::Format("%d", col[rowIdx]); 
+    wxString GetValue(int row, int col) override {
+        return std::visit([&](auto&& span) -> wxString {
+            using T = std::decay_t<decltype(span)>;
+            if (row < 0 || row >= static_cast<int>(span.size()))
+                return wxString("N/A");
+            if constexpr (std::is_same_v<T, std::span<const int32_t>>)
+                return wxString::Format("%d", span[row]);
+            else if constexpr (std::is_same_v<T, std::span<const double>>)
+                return wxString::Format("%.6f", span[row]);
+            else if constexpr (std::is_same_v<T, std::span<const char_buf>>) {
+                return wxString::FromUTF8(span[row].data());
+            }
+            else
+                return wxString("?");
+        }, cols[col]);
     }
+
     void SetValue(int, int, const wxString&) override { }
 
-    wxString GetColLabelValue(int col) override { return wxString::Format("%d", col); }
-    wxString GetRowLabelValue(int row) override { return wxString::Format("%d", row); }
-
-    bool CanGetValueAs(int, int, const wxString& typeName) override {
-        return typeName == "string" || typeName == "double" || typeName == "long";
+    wxString GetColLabelValue(int col) override {
+        return wxString(std::string(1, 'A' + col));
     }
-    bool CanSetValueAs(int, int, const wxString& typeName) override { return CanGetValueAs(0,0,typeName); }
 
-    double GetValueAsDouble(int, int) override { return 69.0; }
-    long GetValueAsLong(int, int) override { return 69; }
-    void SetValueAsDouble(int, int, double) override { }
-    void SetValueAsLong(int, int, long) override { }
+    wxString GetRowLabelValue(int row) override {
+        return wxString::Format("%d", row);
+    }
+
 private:
-    mio::mmap_source mmap;
-    int rows;
-    std::span<const int32_t> col;
+    std::vector<mio::mmap_source> colMmappers;
+    std::vector<Column> cols;
+    int rows = 0;
+    int numCols = 0;
 };
 
 class SpreadsheetFrame : public wxFrame {
@@ -80,9 +155,11 @@ public:
         // Grid
         grid = new wxGrid(this, wxID_ANY);
         
-        MyGridTable* table = new MyGridTable(filePath.ToStdString());
+        MmappedTable* table = new MmappedTable(filePath.ToStdString());
+        std::cout << "Setting table";
+
         grid->SetTable(table, true, wxGrid::wxGridSelectCells);
-        
+        std::cout << "Rows in grid: " << grid->GetNumberRows() << "\n"; 
         // Make sure scrolling is enabled and the grid knows it has content
         grid->EnableScrolling(true, true);
         grid->SetRowLabelSize(80); 
