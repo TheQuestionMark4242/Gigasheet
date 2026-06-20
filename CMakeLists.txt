@@ -29,7 +29,7 @@ endif()
 # Target setup
 # -----------------------------------------------------------------------------
 # add_executable(spreadsheet app.cpp)
-add_executable(spreadsheet app.cpp)
+add_executable(spreadsheet src/app.cpp)
 
 target_include_directories(spreadsheet PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
 target_compile_options(spreadsheet PRIVATE ${WX_CXX_FLAGS})

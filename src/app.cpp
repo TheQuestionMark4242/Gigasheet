@@ -1,4 +1,3 @@
-// integrated_spreadsheet.cpp
 #include <wx/wx.h>
 #include <wx/cmdline.h>
 #include <wx/grid.h>
@@ -17,123 +16,11 @@
 
 #include "mio/mmap.hpp"
 
-// Boost.Spirit includes (same grammar / AST as you already have)
-#include <boost/spirit/home/x3.hpp>
-#include <boost/spirit/home/x3/support/ast/variant.hpp>
-#include <boost/fusion/include/adapt_struct.hpp>
+#include "parser/ast.hpp"
+#include "parser/parser.cpp"
 
-namespace fs = std::filesystem;
-namespace x3 = boost::spirit::x3;
 
 using char_buf = std::array<char, 64>;
-
-enum class ColumnType : uint8_t {
-    INT32  = 0,
-    DOUBLE = 1,
-    CHARBUF = 2
-};
-
-// ----------------- Parser AST (copied/adapted from your working parser) -----------------
-namespace client { namespace ast {
-    struct nil {};
-    struct signed_;
-    struct program;
-    struct column_ref;
-
-    struct operand : x3::variant<
-            nil
-          , unsigned int
-          , x3::forward_ast<column_ref>
-          , x3::forward_ast<signed_>
-          , x3::forward_ast<program>
-        >
-    {
-        using base_type::base_type;
-        using base_type::operator=;
-    };
-
-    struct column_ref { char name; };
-    struct signed_ { char sign; operand operand_; };
-    struct operation { char operator_; operand operand_; };
-    struct program { operand first; std::list<operation> rest; };
-}}
-
-BOOST_FUSION_ADAPT_STRUCT(client::ast::column_ref, name)
-BOOST_FUSION_ADAPT_STRUCT(client::ast::signed_, sign, operand_)
-BOOST_FUSION_ADAPT_STRUCT(client::ast::operation, operator_, operand_)
-BOOST_FUSION_ADAPT_STRUCT(client::ast::program, first, rest)
-
-// Global column_map used by parser evaluator (keeps integration minimal)
-static std::map<char, std::function<double(int)>> column_map;
-
-namespace client {
-    namespace ast {
-        struct eval {
-            using result_type = std::function<double(int)>;
-
-            result_type operator()(nil) const {
-                return [](int){ return 0.0; };
-            }
-
-            result_type operator()(unsigned int n) const {
-                return [n](int){ return static_cast<double>(n); };
-            }
-
-            result_type operator()(ast::column_ref const& c) const {
-                auto it = column_map.find(c.name);
-                if (it != column_map.end())
-                    return it->second;
-                return [](int){ return 0.0; };
-            }
-
-            result_type operator()(signed_ const& x) const {
-                auto rhs = boost::apply_visitor(*this, x.operand_);
-                if (x.sign == '-') return [=](int i){ return -rhs(i); };
-                return rhs;
-            }
-
-            result_type operator()(operation const& op, result_type lhs) const {
-                auto rhs = boost::apply_visitor(*this, op.operand_);
-                switch (op.operator_) {
-                    case '+': return [=](int i){ return lhs(i) + rhs(i); };
-                    case '-': return [=](int i){ return lhs(i) - rhs(i); };
-                    case '*': return [=](int i){ return lhs(i) * rhs(i); };
-                    case '/': return [=](int i){ return lhs(i) / rhs(i); };
-                }
-                return [](int){ return 0.0; };
-            }
-
-            result_type operator()(program const& x) const {
-                auto current = boost::apply_visitor(*this, x.first);
-                for (auto const& op : x.rest) {
-                    current = (*this)(op, current);
-                }
-                return current;
-            }
-        };
-    }
-}
-
-namespace client {
-    namespace calculator_grammar {
-        using x3::uint_;
-        using x3::char_;
-
-        x3::rule<class expression, ast::program> const expression("expression");
-        x3::rule<class term, ast::program> const term("term");
-        x3::rule<class factor, ast::operand> const factor("factor");
-        x3::rule<class colref, ast::column_ref> const colref("colref");
-
-        auto const expression_def = term >> *( (char_('+') >> term) | (char_('-') >> term) );
-        auto const term_def = factor >> *( (char_('*') >> factor) | (char_('/') >> factor) );
-        auto const colref_def = char_("A-Z");
-        auto const factor_def = uint_ | colref | '(' >> expression >> ')' | (char_('-') >> factor) | (char_('+') >> factor);
-
-        BOOST_SPIRIT_DEFINE(expression, term, factor, colref);
-        auto calculator = expression;
-    }
-    using calculator_grammar::calculator;
-}
 
 // ----------------- Unified column function variant -----------------
 using FnInt   = std::function<int32_t(int)>;
