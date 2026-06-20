@@ -1,0 +1,52 @@
+cmake_minimum_required(VERSION 3.20)
+project(Spreadsheet LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# ----------------------------------------------------------------------------- 
+# Try to locate wxWidgets using wx-config (works best on MSYS2 / MinGW)
+# -----------------------------------------------------------------------------
+find_program(WX_CONFIG_EXECUTABLE wx-config HINTS /mingw64/bin)
+
+if(WX_CONFIG_EXECUTABLE)
+    message(STATUS "Found wx-config: ${WX_CONFIG_EXECUTABLE}")
+
+    execute_process(COMMAND ${WX_CONFIG_EXECUTABLE} --cxxflags
+                    OUTPUT_VARIABLE WX_CXX_FLAGS
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND ${WX_CONFIG_EXECUTABLE} --libs core,base
+                    OUTPUT_VARIABLE WX_LIBS
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+    separate_arguments(WX_CXX_FLAGS)
+    separate_arguments(WX_LIBS)
+else()
+    message(FATAL_ERROR "wx-config not found — please install wxWidgets (pacman -S mingw-w64-x86_64-wxWidgets).")
+endif()
+
+# ----------------------------------------------------------------------------- 
+# Target setup
+# -----------------------------------------------------------------------------
+# add_executable(spreadsheet app.cpp)
+add_executable(spreadsheet app.cpp)
+
+target_include_directories(spreadsheet PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
+target_compile_options(spreadsheet PRIVATE ${WX_CXX_FLAGS})
+target_link_libraries(spreadsheet PRIVATE ${WX_LIBS})
+
+# Include mio headers (header-only)
+# target_include_directories(spreadsheet PRIVATE
+#     ${CMAKE_CURRENT_SOURCE_DIR}/extern/mio
+# )
+
+# wxWidgets compile + link flags
+target_compile_options(spreadsheet PRIVATE ${WX_CXX_FLAGS})
+target_link_libraries(spreadsheet PRIVATE ${WX_LIBS})
+
+# ----------------------------------------------------------------------------- 
+# Default to Release build if unspecified
+# -----------------------------------------------------------------------------
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+endif()
