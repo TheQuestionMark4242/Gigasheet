@@ -1,2 +1,2 @@
-# GigachadCheatsheet
-Excel for 100M rows, or an attempt thereof
+# Gigasheet
+Excel for 1B rows, or an attempt thereof
