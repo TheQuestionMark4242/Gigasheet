@@ -18,10 +18,10 @@
 
 #include "parser/ast.hpp"
 #include "parser/parser.cpp"
-
+#include "model/column_types.hpp"
 
 using char_buf = std::array<char, 64>;
-
+namespace fs = std::filesystem;
 // ----------------- Unified column function variant -----------------
 using FnInt   = std::function<int32_t(int)>;
 using FnDbl   = std::function<double(int)>;

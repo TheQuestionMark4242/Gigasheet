@@ -1,6 +1,5 @@
 #pragma once 
 
-
 #include <w/grid.h>
 #include <mmapped_table.hpp>
 
