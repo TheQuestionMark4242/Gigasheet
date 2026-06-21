@@ -4,7 +4,7 @@ out/
 bin/
 .vscode/
 .idea/
-
+.agents/
 *.o
 *.obj
 *.exe

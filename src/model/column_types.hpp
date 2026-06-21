@@ -1,5 +1,10 @@
 #pragma once
+
+#include <array>
 #include <cstdint>
+#include <functional>
+#include <string>
+#include <variant>
 
 enum class ColumnType : uint8_t {
     INT32  = 0,
@@ -8,7 +13,7 @@ enum class ColumnType : uint8_t {
 };
 
 using char_buf = std::array<char, 64>;
-namespace fs = std::filesystem;
+
 // ----------------- Unified column function variant -----------------
 using FnInt   = std::function<int32_t(int)>;
 using FnDbl   = std::function<double(int)>;

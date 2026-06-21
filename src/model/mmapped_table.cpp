@@ -1,13 +1,20 @@
-#pragma once 
-
-#include <w/grid.h>
-
 #include "mmapped_table.hpp"
-#include "column_types.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <stdexcept>
+
+#include <wx/msgdlg.h>
+
+#include "../parser/ast.hpp"
+#include "../parser/parser.cpp"
 
 namespace fs = std::filesystem;
 
-MMappedTable::MmappedTable(const std::string& dirPath) {
+MmappedTable::MmappedTable(const std::string& dirPath) {
     // read metadata (int32 numcols, then uint8_t codes)
     auto metaPath = fs::path(dirPath) / "metadata.bin";
     std::ifstream meta(metaPath, std::ios::binary);
@@ -66,108 +73,102 @@ MMappedTable::MmappedTable(const std::string& dirPath) {
     }
 }
 
+void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
+    // parse expression (strip leading '=' if present)
+    std::string s = expr.ToStdString();
+    if (!s.empty() && s[0] == '=') s = s.substr(1);
 
-class MmappedTable : public wxGridTableBase {
-public:
+    using iterator_type = std::string::const_iterator;
+    client::ast::program program;
+    iterator_type iter = s.begin(), end = s.end();
+    boost::spirit::x3::ascii::space_type space;
+    bool ok = phrase_parse(iter, end, client::calculator, space, program);
+    if (!ok || iter != end) {
+        wxMessageBox("Parse error in expression: " + expr, "Parse Error", wxICON_ERROR);
+        return;
+    }
 
-    // Add a derived column by expression (e.g. "=A + B*2"). gridPtr is used to notify view.
-    void AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
-        // parse expression (strip leading '=' if present)
-        std::string s = expr.ToStdString();
-        if (!s.empty() && s[0] == '=') s = s.substr(1);
+    // Build temporary column_map used by parser evaluator.
+    column_map.clear();
+    for (size_t i = 0; i < columns.size(); ++i) {
+        char name = static_cast<char>('A' + i);
+        Column& c = columns[i];
 
-        using iterator_type = std::string::const_iterator;
-        client::ast::program program;
-        iterator_type iter = s.begin(), end = s.end();
-        boost::spirit::x3::ascii::space_type space;
-        bool ok = phrase_parse(iter, end, client::calculator, space, program);
-        if (!ok || iter != end) {
-            wxMessageBox("Parse error in expression: " + expr, "Parse Error", wxICON_ERROR);
-            return;
-        }
-
-        // Build temporary column_map used by parser evaluator.
-        column_map.clear();
-        for (size_t i = 0; i < columns.size(); ++i) {
-            char name = static_cast<char>('A' + i);
-            Column& c = columns[i];
-
-            // Each mapped function must produce a double for evaluator
-            if (c.type == ColumnType::INT32) {
-                auto f = std::get<FnInt>(c.fn); // safe
-                column_map[name] = [f](int row) -> double { return static_cast<double>(f(row)); };
-            } else if (c.type == ColumnType::DOUBLE) {
-                auto f = std::get<FnDbl>(c.fn);
-                column_map[name] = [f](int row) -> double { return f(row); };
-            } else { // char_buf -> we return 0.0 (string ops not supported yet)
-                column_map[name] = [](int){ return 0.0; };
-            }
-        }
-
-        // Evaluate AST -> std::function<double(int)>
-        client::ast::eval evaluator;
-        std::function<double(int)> derived = evaluator(program);
-
-        // push derived column as a DOUBLE-returning callable
-        Column dc;
-        dc.type = ColumnType::DOUBLE;
-        dc.label = "D" + std::to_string(derivedColumns.size());
-        dc.fn = FnDbl([derived](int row) -> double { return derived(row); });
-
-        derivedColumns.push_back(dc);
-
-        // notify grid view: append 1 column
-        if (gridPtr) {
-            // append to columns vector as well so indexing is consistent (derivedColumns holds only derived cols)
-            columns.push_back(dc);
-
-            wxGridTableMessage msg(this, wxGRIDTABLE_NOTIFY_COLS_APPENDED, 1);
-            gridPtr->ProcessTableMessage(msg);
-            gridPtr->ForceRefresh();
+        // Each mapped function must produce a double for evaluator
+        if (c.type == ColumnType::INT32) {
+            auto f = std::get<FnInt>(c.fn); // safe
+            column_map[name] = [f](int row) -> double { return static_cast<double>(f(row)); };
+        } else if (c.type == ColumnType::DOUBLE) {
+            auto f = std::get<FnDbl>(c.fn);
+            column_map[name] = [f](int row) -> double { return f(row); };
+        } else { // char_buf -> we return 0.0 (string ops not supported yet)
+            column_map[name] = [](int){ return 0.0; };
         }
     }
 
-    // -------- wxGridTableBase overrides ----------
-    int GetNumberRows() override { return rows; }
-    int GetNumberCols() override { return static_cast<int>(columns.size()); }
+    // Evaluate AST -> std::function<double(int)>
+    client::ast::eval evaluator;
+    std::function<double(int)> derived = evaluator(program);
 
-    bool IsEmptyCell(int row, int col) override {
-        return row < 0 || row >= rows || col < 0 || col >= static_cast<int>(columns.size());
+    // push derived column as a DOUBLE-returning callable
+    Column dc;
+    dc.type = ColumnType::DOUBLE;
+    dc.label = "D" + std::to_string(derivedColumns.size());
+    dc.fn = FnDbl([derived](int row) -> double { return derived(row); });
+
+    derivedColumns.push_back(dc);
+
+    // notify grid view: append 1 column
+    if (gridPtr) {
+        // append to columns vector as well so indexing is consistent (derivedColumns holds only derived cols)
+        columns.push_back(dc);
+
+        wxGridTableMessage msg(this, wxGRIDTABLE_NOTIFY_COLS_APPENDED, 1);
+        gridPtr->ProcessTableMessage(msg);
+        gridPtr->ForceRefresh();
     }
+}
 
-    wxString GetValue(int row, int col) override {
-        if (IsEmptyCell(row, col)) return "N/A";
-        Column& c = columns[col];
+int MmappedTable::GetNumberRows() {
+    return rows;
+}
 
-        return std::visit([row](auto&& f) -> wxString {
-            using F = std::decay_t<decltype(f)>;
-            if constexpr (std::is_same_v<F, FnInt>) {
-                return wxString::Format("%d", f(row));
-            } else if constexpr (std::is_same_v<F, FnDbl>) {
-                return wxString::Format("%.6f", f(row));
-            } else if constexpr (std::is_same_v<F, FnChar>) {
-                char_buf b = f(row);
-                // ensure null termination
-                b[63] = '\0';
-                return wxString::FromUTF8(b.data());
-            } else return wxString("?");
-        }, c.fn);
-    }
+int MmappedTable::GetNumberCols() {
+    return static_cast<int>(columns.size());
+}
 
-    void SetValue(int, int, const wxString&) override { /* readonly for now */ }
+bool MmappedTable::IsEmptyCell(int row, int col) {
+    return row < 0 || row >= rows || col < 0 || col >= static_cast<int>(columns.size());
+}
 
-    wxString GetColLabelValue(int col) override {
-        if (col < 0 || col >= static_cast<int>(columns.size())) return "";
-        return columns[col].label;
-    }
+wxString MmappedTable::GetValue(int row, int col) {
+    if (IsEmptyCell(row, col)) return "N/A";
+    Column& c = columns[col];
 
-    wxString GetRowLabelValue(int row) override {
-        return wxString::Format("%d", row);
-    }
+    return std::visit([row](auto&& f) -> wxString {
+        using F = std::decay_t<decltype(f)>;
+        if constexpr (std::is_same_v<F, FnInt>) {
+            return wxString::Format("%d", f(row));
+        } else if constexpr (std::is_same_v<F, FnDbl>) {
+            return wxString::Format("%.6f", f(row));
+        } else if constexpr (std::is_same_v<F, FnChar>) {
+            char_buf b = f(row);
+            // ensure null termination
+            b[63] = '\0';
+            return wxString::FromUTF8(b.data());
+        } else return wxString("?");
+    }, c.fn);
+}
 
-private:
-    std::vector<mio::mmap_source> mmaps;   // keep mmaps alive
-    std::vector<Column> columns;           // base + derived (in the same vector)
-    std::vector<Column> derivedColumns;    // keep derived for metadata if needed
-    int rows = 0;
-};
+void MmappedTable::SetValue(int, int, const wxString&) {
+    /* readonly for now */
+}
+
+wxString MmappedTable::GetColLabelValue(int col) {
+    if (col < 0 || col >= static_cast<int>(columns.size())) return "";
+    return columns[col].label;
+}
+
+wxString MmappedTable::GetRowLabelValue(int row) {
+    return wxString::Format("%d", row);
+}
