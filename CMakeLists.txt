@@ -29,8 +29,13 @@ endif()
 # Target setup
 # -----------------------------------------------------------------------------
 # add_executable(spreadsheet app.cpp)
-add_executable(spreadsheet src/app.cpp)
-
+add_executable(
+    spreadsheet 
+    src/app.cpp
+    src/ui/app.cpp
+    src/ui/spreadsheet_frame.cpp
+    src/model/mmapped_table.cpp 
+)
 target_include_directories(spreadsheet PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
 target_compile_options(spreadsheet PRIVATE ${WX_CXX_FLAGS})
 target_link_libraries(spreadsheet PRIVATE ${WX_LIBS})

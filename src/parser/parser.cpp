@@ -1,11 +1,11 @@
-#pragma once 
-
+#pragma once
 #include <map> 
 #include <functional>
 #include <boost/spirit/home/x3.hpp>
 #include <boost/spirit/home/x3/support/ast/variant.hpp>
 #include <boost/fusion/include/adapt_struct.hpp>
 
+#include "ast.hpp"
 static std::map<char, std::function<double(int)>> column_map;
 
 namespace client {
