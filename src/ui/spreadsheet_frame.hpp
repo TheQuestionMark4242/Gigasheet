@@ -1,7 +1,6 @@
 #pragma once 
 
 #include <wx/wx.h>
-#include <wx/cmdline.h>
 #include <wx/grid.h>
 #include <wx/artprov.h>
 
@@ -12,6 +11,7 @@ public:
     SpreadsheetFrame(const wxString& directory);
 
 private:
+    void OnOpenCsv(wxCommandEvent&);
     void OnAddColumn(wxCommandEvent&);
 
     wxGrid* grid = nullptr;

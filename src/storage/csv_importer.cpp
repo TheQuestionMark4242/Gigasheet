@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -10,6 +9,7 @@
 #include <vector>
 
 #include "csv.hpp"
+#include "csv_importer.hpp"
 
 #include "../model/column_types.hpp"
 
@@ -103,8 +103,6 @@ void WriteDataFiles(
     const fs::path& outputDir,
     const std::vector<ColumnType>& types
 ) {
-    using clock = std::chrono::steady_clock;
-
     std::vector<std::ofstream> outs;
     outs.reserve(types.size());
     for (size_t col = 0; col < types.size(); ++col) {
@@ -131,11 +129,7 @@ void WriteDataFiles(
         }
     }
 
-    std::chrono::nanoseconds flushTime{0};
-    std::chrono::nanoseconds parseTime{0};
-
     auto flushBuffers = [&]() {
-        const auto flushStart = clock::now();
         for (size_t col = 0; col < types.size(); ++col) {
             switch (types[col]) {
                 case ColumnType::INT32: {
@@ -176,13 +170,11 @@ void WriteDataFiles(
                 }
             }
         }
-        flushTime += std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - flushStart);
     };
 
     csv::CSVRow row;
     size_t bufferedRows = 0;
     while (reader.read_row(row)) {
-        const auto parseStart = clock::now();
         for (size_t col = 0; col < types.size(); ++col) {
             if (col >= row.size()) {
                 switch (types[col]) {
@@ -202,17 +194,24 @@ void WriteDataFiles(
             auto field = row[col];
             switch (types[col]) {
                 case ColumnType::INT32:
-                    intBuffers[col].push_back(field.get<int32_t>());
+                {
+                    int32_t value = 0;
+                    field.try_get(value);
+                    intBuffers[col].push_back(value);
                     break;
+                }
                 case ColumnType::DOUBLE:
-                    doubleBuffers[col].push_back(field.get<double>());
+                {
+                    double value = 0.0;
+                    field.try_get(value);
+                    doubleBuffers[col].push_back(value);
                     break;
+                }
                 case ColumnType::CHARBUF:
                     charBuffers[col].push_back(ToCharBuf(field.get<std::string>()));
                     break;
             }
         }
-        parseTime += std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - parseStart);
 
         ++bufferedRows;
         if (bufferedRows >= kFlushRows) {
@@ -222,13 +221,6 @@ void WriteDataFiles(
     }
 
     flushBuffers();
-
-    std::cout << "WriteDataFiles parse time: "
-              << std::chrono::duration_cast<std::chrono::milliseconds>(parseTime).count()
-              << " ms\n";
-    std::cout << "WriteDataFiles flush time: "
-              << std::chrono::duration_cast<std::chrono::milliseconds>(flushTime).count()
-              << " ms\n";
 }
 
 csv::CSVFormat MakeFormat() {
@@ -240,59 +232,44 @@ csv::CSVFormat MakeFormat() {
 
 } // namespace
 
-int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::cerr << "Usage: csv_importer <input.csv> <output_dir>\n";
-        return 1;
+std::filesystem::path ImportCsv(
+    const fs::path& inputPath,
+    const fs::path& outputDir) 
+{
+    const csv::CSVFormat format = MakeFormat();
+
+    csv::CSVReader headerReader(inputPath.string(), format);
+    const std::vector<std::string> headerRow = headerReader.get_col_names();
+
+    if (headerRow.empty()) {
+        throw std::runtime_error("CSV has no columns to import.");
     }
 
-    const fs::path inputPath = argv[1];
-    const fs::path outputDir = argv[2];
+    auto inferenceReader = csv::CSVReader(inputPath.string(), format);
+    const std::vector<ColumnType> types =
+        InferTypes(inferenceReader, headerRow.size(), kInferenceRows);
 
-    try {
-        const csv::CSVFormat format = MakeFormat();
+    fs::create_directories(outputDir);
 
-        csv::CSVReader headerReader(inputPath.string(), format);
-        const std::vector<std::string> headerRow = headerReader.get_col_names();
-        if (headerRow.empty()) {
-            std::cerr << "CSV has no columns to import.\n";
-            return 1;
+    {
+        std::ofstream meta(outputDir / "metadata.bin", std::ios::binary);
+
+        if (!meta) {
+            throw std::runtime_error(
+                "Failed to create metadata.bin in " +
+                outputDir.string());
         }
 
-        auto inferenceReader = csv::CSVReader(inputPath.string(), format);
-        const auto inferenceStart = std::chrono::steady_clock::now();
-        const std::vector<ColumnType> types = InferTypes(inferenceReader, headerRow.size(), kInferenceRows);
-        const auto inferenceEnd = std::chrono::steady_clock::now();
+        WriteMetadata(meta, headerRow, types);
 
-        fs::create_directories(outputDir);
-
-        const auto writeStart = std::chrono::steady_clock::now();
-        {
-            std::ofstream meta(outputDir / "metadata.bin", std::ios::binary);
-            if (!meta) {
-                std::cerr << "Failed to create metadata.bin in " << outputDir.string() << "\n";
-                return 1;
-            }
-
-            WriteMetadata(meta, headerRow, types);
-            if (!meta) {
-                std::cerr << "Failed to write metadata.bin\n";
-                return 1;
-            }
+        if (!meta) {
+            throw std::runtime_error(
+                "Failed to write metadata.bin");
         }
-
-        auto writeReader = csv::CSVReader(inputPath.string(), format);
-        WriteDataFiles(writeReader, outputDir, types);
-
-        const auto inferenceMs = std::chrono::duration_cast<std::chrono::milliseconds>(inferenceEnd - inferenceStart).count();
-        const auto writeMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - writeStart).count();
-
-        std::cout << "Imported " << headerRow.size() << " columns into " << outputDir.string() << "\n";
-        std::cout << "Type inference: " << inferenceMs << " ms\n";
-        std::cout << "File writing: " << writeMs << " ms\n";
-        return 0;
-    } catch (const std::exception& ex) {
-        std::cerr << "csv_importer failed: " << ex.what() << "\n";
-        return 1;
     }
+
+    auto writeReader = csv::CSVReader(inputPath.string(), format);
+    WriteDataFiles(writeReader, outputDir, types);
+
+    return outputDir;
 }
