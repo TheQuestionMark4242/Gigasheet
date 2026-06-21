@@ -18,6 +18,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr size_t kInferenceRows = 20;
+constexpr size_t kFlushRows = 1'000'000;
 
 std::string MakeColumnName(const std::vector<std::string>& headerRow, size_t col) {
     if (col < headerRow.size() && !headerRow[col].empty()) {
@@ -102,6 +103,8 @@ void WriteDataFiles(
     const fs::path& outputDir,
     const std::vector<ColumnType>& types
 ) {
+    using clock = std::chrono::steady_clock;
+
     std::vector<std::ofstream> outs;
     outs.reserve(types.size());
     for (size_t col = 0; col < types.size(); ++col) {
@@ -111,32 +114,121 @@ void WriteDataFiles(
         }
     }
 
-    csv::CSVRow row;
-    while (reader.read_row(row)) {
+    std::vector<std::vector<int32_t>> intBuffers(types.size());
+    std::vector<std::vector<double>> doubleBuffers(types.size());
+    std::vector<std::vector<char_buf>> charBuffers(types.size());
+    for (size_t col = 0; col < types.size(); ++col) {
+        switch (types[col]) {
+            case ColumnType::INT32:
+                intBuffers[col].reserve(kFlushRows);
+                break;
+            case ColumnType::DOUBLE:
+                doubleBuffers[col].reserve(kFlushRows);
+                break;
+            case ColumnType::CHARBUF:
+                charBuffers[col].reserve(kFlushRows);
+                break;
+        }
+    }
+
+    std::chrono::nanoseconds flushTime{0};
+    std::chrono::nanoseconds parseTime{0};
+
+    auto flushBuffers = [&]() {
+        const auto flushStart = clock::now();
         for (size_t col = 0; col < types.size(); ++col) {
             switch (types[col]) {
                 case ColumnType::INT32: {
-                    const int32_t value = (col < row.size()) ? row[col].get<int32_t>() : 0;
-                    outs[col].write(reinterpret_cast<const char*>(&value), sizeof(value));
+                    const auto& buffer = intBuffers[col];
+                    if (!buffer.empty()) {
+                        outs[col].write(reinterpret_cast<const char*>(buffer.data()),
+                                        static_cast<std::streamsize>(buffer.size() * sizeof(int32_t)));
+                        if (!outs[col]) {
+                            throw std::runtime_error("Failed while writing int column " + std::to_string(col));
+                        }
+                        intBuffers[col].clear();
+                    }
                     break;
                 }
                 case ColumnType::DOUBLE: {
-                    const double value = (col < row.size()) ? row[col].get<double>() : 0.0;
-                    outs[col].write(reinterpret_cast<const char*>(&value), sizeof(value));
+                    const auto& buffer = doubleBuffers[col];
+                    if (!buffer.empty()) {
+                        outs[col].write(reinterpret_cast<const char*>(buffer.data()),
+                                        static_cast<std::streamsize>(buffer.size() * sizeof(double)));
+                        if (!outs[col]) {
+                            throw std::runtime_error("Failed while writing double column " + std::to_string(col));
+                        }
+                        doubleBuffers[col].clear();
+                    }
                     break;
                 }
                 case ColumnType::CHARBUF: {
-                    const auto buf = (col < row.size()) ? ToCharBuf(row[col].get<std::string>()) : std::array<char, 64>{};
-                    outs[col].write(buf.data(), static_cast<std::streamsize>(buf.size()));
+                    const auto& buffer = charBuffers[col];
+                    if (!buffer.empty()) {
+                        outs[col].write(reinterpret_cast<const char*>(buffer.data()),
+                                        static_cast<std::streamsize>(buffer.size() * sizeof(char_buf)));
+                        if (!outs[col]) {
+                            throw std::runtime_error("Failed while writing string column " + std::to_string(col));
+                        }
+                        charBuffers[col].clear();
+                    }
                     break;
                 }
             }
+        }
+        flushTime += std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - flushStart);
+    };
 
-            if (!outs[col]) {
-                throw std::runtime_error("Failed while writing column " + std::to_string(col));
+    csv::CSVRow row;
+    size_t bufferedRows = 0;
+    while (reader.read_row(row)) {
+        const auto parseStart = clock::now();
+        for (size_t col = 0; col < types.size(); ++col) {
+            if (col >= row.size()) {
+                switch (types[col]) {
+                    case ColumnType::INT32:
+                        intBuffers[col].push_back(0);
+                        break;
+                    case ColumnType::DOUBLE:
+                        doubleBuffers[col].push_back(0.0);
+                        break;
+                    case ColumnType::CHARBUF:
+                        charBuffers[col].push_back(std::array<char, 64>{});
+                        break;
+                }
+                continue;
+            }
+
+            auto field = row[col];
+            switch (types[col]) {
+                case ColumnType::INT32:
+                    intBuffers[col].push_back(field.get<int32_t>());
+                    break;
+                case ColumnType::DOUBLE:
+                    doubleBuffers[col].push_back(field.get<double>());
+                    break;
+                case ColumnType::CHARBUF:
+                    charBuffers[col].push_back(ToCharBuf(field.get<std::string>()));
+                    break;
             }
         }
+        parseTime += std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - parseStart);
+
+        ++bufferedRows;
+        if (bufferedRows >= kFlushRows) {
+            flushBuffers();
+            bufferedRows = 0;
+        }
     }
+
+    flushBuffers();
+
+    std::cout << "WriteDataFiles parse time: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(parseTime).count()
+              << " ms\n";
+    std::cout << "WriteDataFiles flush time: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(flushTime).count()
+              << " ms\n";
 }
 
 csv::CSVFormat MakeFormat() {
@@ -191,10 +283,9 @@ int main(int argc, char** argv) {
 
         auto writeReader = csv::CSVReader(inputPath.string(), format);
         WriteDataFiles(writeReader, outputDir, types);
-        const auto writeEnd = std::chrono::steady_clock::now();
 
         const auto inferenceMs = std::chrono::duration_cast<std::chrono::milliseconds>(inferenceEnd - inferenceStart).count();
-        const auto writeMs = std::chrono::duration_cast<std::chrono::milliseconds>(writeEnd - writeStart).count();
+        const auto writeMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - writeStart).count();
 
         std::cout << "Imported " << headerRow.size() << " columns into " << outputDir.string() << "\n";
         std::cout << "Type inference: " << inferenceMs << " ms\n";

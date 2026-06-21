@@ -25,6 +25,15 @@ else()
     message(FATAL_ERROR "wx-config not found — please install wxWidgets (pacman -S mingw-w64-x86_64-wxWidgets).")
 endif()
 
+# -----------------------------------------------------------------------------
+# Third-party CSV parser
+# -----------------------------------------------------------------------------
+set(BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+set(CSV_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(CSV_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(CSV_BUILD_SINGLE_INCLUDE_TEST OFF CACHE BOOL "" FORCE)
+add_subdirectory(third-party/csv-parser EXCLUDE_FROM_ALL)
+
 # ----------------------------------------------------------------------------- 
 # Target setup
 # -----------------------------------------------------------------------------
@@ -39,6 +48,9 @@ add_executable(
 target_include_directories(spreadsheet PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third-party)
 target_compile_options(spreadsheet PRIVATE ${WX_CXX_FLAGS})
 target_link_libraries(spreadsheet PRIVATE ${WX_LIBS})
+
+add_executable(csv_importer src/storage/csv_importer.cpp)
+target_link_libraries(csv_importer PRIVATE csv)
 
 # Include mio headers (header-only)
 # target_include_directories(spreadsheet PRIVATE
