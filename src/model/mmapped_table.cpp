@@ -1,7 +1,9 @@
 #pragma once 
 
 #include <w/grid.h>
-#include <mmapped_table.hpp>
+
+#include "mmapped_table.hpp"
+#include "column_types.hpp"
 
 namespace fs = std::filesystem;
 
