@@ -4,9 +4,6 @@ project(Spreadsheet LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ----------------------------------------------------------------------------- 
-# Try to locate wxWidgets using wx-config (works best on MSYS2 / MinGW)
-# -----------------------------------------------------------------------------
 find_program(WX_CONFIG_EXECUTABLE wx-config HINTS /mingw64/bin)
 
 if(WX_CONFIG_EXECUTABLE)
@@ -25,10 +22,6 @@ else()
     message(FATAL_ERROR "wx-config not found — please install wxWidgets (pacman -S mingw-w64-x86_64-wxWidgets).")
 endif()
 
-# ----------------------------------------------------------------------------- 
-# Target setup
-# -----------------------------------------------------------------------------
-
 add_executable(
     spreadsheet 
     src/app.cpp
@@ -36,19 +29,34 @@ add_executable(
     src/ui/spreadsheet_frame.cpp
     src/model/mmapped_table.cpp 
     src/storage/csv_importer.cpp
+    src/storage/memory_usage.cpp
 )
-target_include_directories(spreadsheet PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third-party)
-target_compile_options(spreadsheet PRIVATE ${WX_CXX_FLAGS})
-target_link_libraries(spreadsheet PRIVATE ${WX_LIBS})
 
-# Include mio headers (header-only)
-# target_include_directories(spreadsheet PRIVATE
-#     ${CMAKE_CURRENT_SOURCE_DIR}/extern/mio
-# )
+target_include_directories(
+    spreadsheet
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third-party
+)
 
-# wxWidgets compile + link flags
-target_compile_options(spreadsheet PRIVATE ${WX_CXX_FLAGS})
-target_link_libraries(spreadsheet PRIVATE ${WX_LIBS})
+target_compile_options(
+    spreadsheet
+    PRIVATE
+    ${WX_CXX_FLAGS}
+)
+
+target_link_libraries(
+    spreadsheet
+    PRIVATE
+    ${WX_LIBS}
+)
+
+if(WIN32)
+    target_link_libraries(
+        spreadsheet
+        PRIVATE
+        psapi
+    )
+endif()
 
 # ----------------------------------------------------------------------------- 
 # Default to Release build if unspecified

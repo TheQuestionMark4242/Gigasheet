@@ -13,7 +13,9 @@ public:
 private:
     void OnOpenCsv(wxCommandEvent&);
     void OnAddColumn(wxCommandEvent&);
-
+    void OnTimer(wxTimerEvent&);
+    
+    wxTimer memoryTimer;
     wxGrid* grid = nullptr;
     MmappedTable* table = nullptr;
 };

@@ -7,8 +7,8 @@
 
 #include "spreadsheet_frame.hpp"
 #include "../storage/csv_importer.hpp"
+#include "../storage/memory_usage.hpp"
 #include "../model/mmapped_table.hpp"
-
 namespace {
 
 wxString FindCsvImporterPath() {
@@ -38,10 +38,13 @@ wxString MakeOutputDirectoryPath(const wxString& csvPath) {
     return candidate;
 }
 
-} // namespace
+} 
 
 SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     : wxFrame(nullptr, wxID_ANY, "Spreadsheet", wxDefaultPosition, wxSize(1000,700)) {
+    CreateStatusBar();
+    SetStatusText("Loading...");
+    
     // toolbar
     wxToolBar* toolbar = CreateToolBar();
     toolbar->AddTool(wxID_OPEN, "Open CSV", wxArtProvider::GetBitmap(wxART_FILE_OPEN));
@@ -55,14 +58,39 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     grid = new wxGrid(this, wxID_ANY);
     table = new MmappedTable(dir.ToStdString());
     grid->SetTable(table, true, wxGrid::wxGridSelectCells);
+    
+    SetStatusText(
+        wxString::Format(
+            "Rows: %d | Columns: %d | RAM: %.1f MB",
+            table->GetNumberRows(),
+            table->GetNumberCols(),
+            get_memory_usage_MB()
+        )
+    );
+    memoryTimer.SetOwner(this);
+
+    Bind(
+        wxEVT_TIMER,
+        &SpreadsheetFrame::OnTimer,
+        this);
+
+    memoryTimer.Start(1000); // every second
 
     wxBoxSizer* s = new wxBoxSizer(wxVERTICAL);
     s->Add(grid, 1, wxEXPAND);
     SetSizer(s);
 }
 
-void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&)
-{
+void SpreadsheetFrame::OnTimer(wxTimerEvent&) {
+    SetStatusText(
+        wxString::Format(
+            "Rows: %d | Columns: %d | RAM: %.1f MB",
+            table->GetNumberRows(),
+            table->GetNumberCols(),
+            get_memory_usage_MB()));
+}
+
+void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
     wxFileDialog dlg(
         this,
         "Open CSV",
