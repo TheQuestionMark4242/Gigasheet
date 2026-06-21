@@ -3,6 +3,7 @@
 #include <boost/spirit/home/x3/support/ast/variant.hpp>
 #include <boost/fusion/include/adapt_struct.hpp>
 #include <list>
+#include <string>
 
 namespace x3 = boost::spirit::x3;
 namespace client { namespace ast {
@@ -23,7 +24,7 @@ namespace client { namespace ast {
         using base_type::operator=;
     };
 
-    struct column_ref { char name; };
+    struct column_ref { std::string name; };
     struct signed_ { char sign; operand operand_; };
     struct operation { char operator_; operand operand_; };
     struct program { operand first; std::list<operation> rest; };

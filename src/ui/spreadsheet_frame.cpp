@@ -27,7 +27,7 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
 
 
 void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
-    wxTextEntryDialog dlg(this, "Enter expression like =A + B*2", "Add Derived Column");
+    wxTextEntryDialog dlg(this, "Enter expression like =A + B*2 or =\"My Column\" + 5", "Add Derived Column");
     if (dlg.ShowModal() == wxID_OK) {
         wxString expr = dlg.GetValue();
         table->AddDerivedColumn(expr, grid);

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <string>
 #include <stdexcept>
 
 #include <wx/msgdlg.h>
@@ -15,7 +16,12 @@
 namespace fs = std::filesystem;
 
 MmappedTable::MmappedTable(const std::string& dirPath) {
-    // read metadata (int32 numcols, then uint8_t codes)
+    // read metadata:
+    //   int32 numCols
+    //   repeated numCols times:
+    //     uint8  type
+    //     uint16 labelLen
+    //     char   label[labelLen]
     auto metaPath = fs::path(dirPath) / "metadata.bin";
     std::ifstream meta(metaPath, std::ios::binary);
     if (!meta) throw std::runtime_error("Failed to open metadata: " + metaPath.string());
@@ -25,8 +31,26 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
     if (!meta) throw std::runtime_error("Failed to read number of columns");
 
     std::vector<ColumnType> types(numCols);
-    meta.read(reinterpret_cast<char*>(types.data()), numCols * sizeof(ColumnType));
-    if (!meta) throw std::runtime_error("Failed to read column type list");
+    std::vector<std::string> labels(numCols);
+    for (int i = 0; i < numCols; ++i) {
+        std::uint8_t typeByte = 0;
+        meta.read(reinterpret_cast<char*>(&typeByte), sizeof(typeByte));
+        if (!meta) throw std::runtime_error("Failed to read column type");
+        types[i] = static_cast<ColumnType>(typeByte);
+
+        std::uint16_t labelLen = 0;
+        meta.read(reinterpret_cast<char*>(&labelLen), sizeof(labelLen));
+        if (!meta) throw std::runtime_error("Failed to read column label length");
+
+        labels[i].resize(labelLen);
+        if (labelLen > 0) {
+            meta.read(labels[i].data(), labelLen);
+            if (!meta) throw std::runtime_error("Failed to read column label");
+        }
+        if (labels[i].empty()) {
+            labels[i] = "Column " + std::to_string(i + 1);
+        }
+    }
 
     // load columns: mmap each file, create callable that returns element by index
     for (int i = 0; i < numCols; ++i) {
@@ -46,7 +70,7 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
             rows = std::max(rows, static_cast<int>(n));
             Column col;
             col.type = ColumnType::INT32;
-            col.label = std::string(1, 'A' + static_cast<char>(columns.size()));
+            col.label = labels[i];
             col.fn = FnInt([ptr](int row) -> int32_t { return ptr[row]; });
             columns.push_back(std::move(col));
         }
@@ -56,7 +80,7 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
             rows = std::max(rows, static_cast<int>(n));
             Column col;
             col.type = ColumnType::DOUBLE;
-            col.label = std::string(1, 'A' + static_cast<char>(columns.size()));
+            col.label = labels[i];
             col.fn = FnDbl([ptr](int row) -> double { return ptr[row]; });
             columns.push_back(std::move(col));
         }
@@ -66,7 +90,7 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
             rows = std::max(rows, static_cast<int>(n));
             Column col;
             col.type = ColumnType::CHARBUF;
-            col.label = std::string(1, 'A' + static_cast<char>(columns.size()));
+            col.label = labels[i];
             col.fn = FnChar([ptr](int row) -> char_buf { return ptr[row]; });
             columns.push_back(std::move(col));
         }
@@ -91,18 +115,27 @@ void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
     // Build temporary column_map used by parser evaluator.
     column_map.clear();
     for (size_t i = 0; i < columns.size(); ++i) {
-        char name = static_cast<char>('A' + i);
         Column& c = columns[i];
+        const std::string alias = (i < 26) ? std::string(1, static_cast<char>('A' + static_cast<char>(i))) : std::string{};
+
+        auto registerColumn = [&](const std::string& key, auto fn) {
+            if (!key.empty()) {
+                column_map[key] = std::move(fn);
+            }
+        };
 
         // Each mapped function must produce a double for evaluator
         if (c.type == ColumnType::INT32) {
             auto f = std::get<FnInt>(c.fn); // safe
-            column_map[name] = [f](int row) -> double { return static_cast<double>(f(row)); };
+            registerColumn(c.label, [f](int row) -> double { return static_cast<double>(f(row)); });
+            registerColumn(alias, [f](int row) -> double { return static_cast<double>(f(row)); });
         } else if (c.type == ColumnType::DOUBLE) {
             auto f = std::get<FnDbl>(c.fn);
-            column_map[name] = [f](int row) -> double { return f(row); };
+            registerColumn(c.label, [f](int row) -> double { return f(row); });
+            registerColumn(alias, [f](int row) -> double { return f(row); });
         } else { // char_buf -> we return 0.0 (string ops not supported yet)
-            column_map[name] = [](int){ return 0.0; };
+            registerColumn(c.label, [](int){ return 0.0; });
+            registerColumn(alias, [](int){ return 0.0; });
         }
     }
 

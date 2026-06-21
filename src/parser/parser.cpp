@@ -1,12 +1,12 @@
 #pragma once
-#include <map> 
+#include <map>
 #include <functional>
 #include <boost/spirit/home/x3.hpp>
 #include <boost/spirit/home/x3/support/ast/variant.hpp>
 #include <boost/fusion/include/adapt_struct.hpp>
 
 #include "ast.hpp"
-static std::map<char, std::function<double(int)>> column_map;
+static std::map<std::string, std::function<double(int)>> column_map;
 
 namespace client {
     namespace ast {
@@ -61,17 +61,21 @@ namespace client {
         using x3::uint_;
         using x3::char_;
 
+        x3::rule<class identifier, std::string> const identifier("identifier");
+        x3::rule<class quoted_identifier, std::string> const quoted_identifier("quoted_identifier");
         x3::rule<class expression, ast::program> const expression("expression");
         x3::rule<class term, ast::program> const term("term");
         x3::rule<class factor, ast::operand> const factor("factor");
         x3::rule<class colref, ast::column_ref> const colref("colref");
 
+        auto const identifier_def = x3::lexeme[(x3::alpha | char_('_')) >> *(x3::alnum | char_('_'))];
+        auto const quoted_identifier_def = x3::lexeme['"' >> *(char_ - '"') >> '"'];
         auto const expression_def = term >> *( (char_('+') >> term) | (char_('-') >> term) );
         auto const term_def = factor >> *( (char_('*') >> factor) | (char_('/') >> factor) );
-        auto const colref_def = char_("A-Z");
+        auto const colref_def = quoted_identifier | identifier;
         auto const factor_def = uint_ | colref | '(' >> expression >> ')' | (char_('-') >> factor) | (char_('+') >> factor);
 
-        BOOST_SPIRIT_DEFINE(expression, term, factor, colref);
+        BOOST_SPIRIT_DEFINE(identifier, quoted_identifier, expression, term, factor, colref);
         auto calculator = expression;
     }
     using calculator_grammar::calculator;

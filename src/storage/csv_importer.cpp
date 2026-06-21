@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdlib>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#include "../src/model/column_types.hpp"
+#include "../model/column_types.hpp"
 
 namespace fs = std::filesystem;
 
@@ -39,6 +39,13 @@ std::vector<std::string> SplitCsvLine(const std::string& line) {
 
     cells.push_back(TrimTrailingCR(cell));
     return cells;
+}
+
+std::string MakeColumnName(const std::vector<std::string>& headerRow, size_t col) {
+    if (col < headerRow.size() && !headerRow[col].empty()) {
+        return headerRow[col];
+    }
+    return "Column " + std::to_string(col + 1);
 }
 
 bool IsInt32(std::string_view text) {
@@ -106,19 +113,23 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const std::vector<std::string>& headerRow = rows.front();
     std::vector<ColumnType> types(columnCount, ColumnType::CHARBUF);
+    const auto inferenceStart = std::chrono::steady_clock::now();
     for (size_t col = 0; col < columnCount; ++col) {
         bool allInt = true;
         bool allDouble = true;
+        bool sawValue = false;
 
-        for (const auto& row : rows) {
+        const size_t inferenceEndRow = std::min(rows.size(), static_cast<size_t>(1 + 20));
+        for (size_t rowIndex = 1; rowIndex < inferenceEndRow; ++rowIndex) {
+            const auto& row = rows[rowIndex];
             const std::string value = col < row.size() ? row[col] : std::string{};
             if (value.empty()) {
-                allInt = false;
-                allDouble = false;
-                break;
+                continue;
             }
 
+            sawValue = true;
             if (!IsInt32(value)) {
                 allInt = false;
             }
@@ -127,7 +138,9 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (allInt) {
+        if (!sawValue) {
+            types[col] = ColumnType::CHARBUF;
+        } else if (allInt) {
             types[col] = ColumnType::INT32;
         } else if (allDouble) {
             types[col] = ColumnType::DOUBLE;
@@ -135,9 +148,11 @@ int main(int argc, char** argv) {
             types[col] = ColumnType::CHARBUF;
         }
     }
+    const auto inferenceEnd = std::chrono::steady_clock::now();
 
     fs::create_directories(outputDir);
 
+    const auto writeStart = std::chrono::steady_clock::now();
     {
         std::ofstream meta(outputDir / "metadata.bin", std::ios::binary);
         if (!meta) {
@@ -147,7 +162,15 @@ int main(int argc, char** argv) {
 
         const int32_t numCols = static_cast<int32_t>(columnCount);
         meta.write(reinterpret_cast<const char*>(&numCols), sizeof(numCols));
-        meta.write(reinterpret_cast<const char*>(types.data()), static_cast<std::streamsize>(types.size() * sizeof(ColumnType)));
+        for (size_t col = 0; col < columnCount; ++col) {
+            const std::uint8_t type = static_cast<std::uint8_t>(types[col]);
+            const std::string name = MakeColumnName(headerRow, col);
+            const std::uint16_t nameLen = static_cast<std::uint16_t>(std::min<size_t>(name.size(), std::numeric_limits<std::uint16_t>::max()));
+
+            meta.write(reinterpret_cast<const char*>(&type), sizeof(type));
+            meta.write(reinterpret_cast<const char*>(&nameLen), sizeof(nameLen));
+            meta.write(name.data(), nameLen);
+        }
         if (!meta) {
             std::cerr << "Failed to write metadata.bin\n";
             return 1;
@@ -161,17 +184,18 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        for (const auto& row : rows) {
+        for (size_t rowIndex = 1; rowIndex < rows.size(); ++rowIndex) {
+            const auto& row = rows[rowIndex];
             const std::string value = col < row.size() ? row[col] : std::string{};
 
             switch (types[col]) {
                 case ColumnType::INT32: {
-                    const int32_t parsed = static_cast<int32_t>(std::stoll(value));
+                    const int32_t parsed = value.empty() ? 0 : static_cast<int32_t>(std::stoll(value));
                     out.write(reinterpret_cast<const char*>(&parsed), sizeof(parsed));
                     break;
                 }
                 case ColumnType::DOUBLE: {
-                    const double parsed = std::stod(value);
+                    const double parsed = value.empty() ? 0.0 : std::stod(value);
                     out.write(reinterpret_cast<const char*>(&parsed), sizeof(parsed));
                     break;
                 }
@@ -188,8 +212,15 @@ int main(int argc, char** argv) {
             }
         }
     }
+    const auto writeEnd = std::chrono::steady_clock::now();
 
-    std::cout << "Imported " << rows.size() << " rows and " << columnCount
+    const size_t dataRows = rows.size() > 0 ? rows.size() - 1 : 0;
+    const auto inferenceMs = std::chrono::duration_cast<std::chrono::milliseconds>(inferenceEnd - inferenceStart).count();
+    const auto writeMs = std::chrono::duration_cast<std::chrono::milliseconds>(writeEnd - writeStart).count();
+
+    std::cout << "Imported " << dataRows << " data rows and " << columnCount
               << " columns into " << outputDir.string() << "\n";
+    std::cout << "Type inference: " << inferenceMs << " ms\n";
+    std::cout << "File writing: " << writeMs << " ms\n";
     return 0;
 }
