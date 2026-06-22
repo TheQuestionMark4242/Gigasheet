@@ -43,9 +43,15 @@ jobs:
           install: >
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-wxwidgets
+            mingw-w64-x86_64-wxwidgets3.2-msw
             mingw-w64-x86_64-boost
 
+      - name: Show wx-config
+        shell: msys2 {0}
+        run: |
+          which wx-config
+          wx-config --version
+          
       - name: Configure
         shell: msys2 {0}
         run: |
