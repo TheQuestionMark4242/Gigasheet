@@ -18,7 +18,8 @@ jobs:
           sudo apt install -y \
             build-essential \
             cmake \
-            libwxgtk3.2-dev
+            libwxgtk3.2-dev 
+            libboost-all-dev
 
       - name: Configure
         run: |
