@@ -41,6 +41,7 @@ jobs:
           msystem: MINGW64
           update: true
           install: >
+            make
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-wxwidgets3.2-msw
@@ -55,7 +56,9 @@ jobs:
       - name: Configure
         shell: msys2 {0}
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -G "Unix Makefiles" \
+          -B build \
+          -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         shell: msys2 {0}
