@@ -49,8 +49,8 @@ jobs:
       - name: Show wx-config
         shell: msys2 {0}
         run: |
-          which wx-config
-          wx-config --version
+          wx-config --cxx-flags
+          wx-config --libs
           
       - name: Configure
         shell: msys2 {0}
