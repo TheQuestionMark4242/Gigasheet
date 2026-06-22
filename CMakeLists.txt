@@ -22,7 +22,8 @@ if(WX_CONFIG_EXECUTABLE)
 else()
     message(FATAL_ERROR "wx-config not found — please install wxWidgets (pacman -S mingw-w64-x86_64-wxWidgets).")
 endif()
-
+message(STATUS "Generator = ${CMAKE_GENERATOR}")
+message(STATUS "WX_CXX_FLAGS = ${WX_CXX_FLAGS}")
 add_executable(
     spreadsheet 
     src/app.cpp
