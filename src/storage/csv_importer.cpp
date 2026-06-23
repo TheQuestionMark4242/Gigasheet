@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "csv.hpp"
+#include "../../third-party/csv-parser/csv.hpp"
 #include "csv_importer.hpp"
 
 #include "../model/column_types.hpp"

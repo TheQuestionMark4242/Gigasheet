@@ -9,18 +9,6 @@ find_package(Boost REQUIRED)
 find_program(WX_CONFIG_EXECUTABLE wx-config HINTS /mingw64/bin)
 if(WX_CONFIG_EXECUTABLE)
     message(STATUS "Found wx-config: ${WX_CONFIG_EXECUTABLE}")
-
-    # execute_process(
-    #     COMMAND bash -lc "wx-config --cxxflags"
-    #     RESULT_VARIABLE WX_CXX_RESULT
-    #     OUTPUT_VARIABLE WX_CXX_FLAGS
-    #     ERROR_VARIABLE WX_CXX_ERROR
-    # )
-
-    # message(STATUS "WX_CXX_RESULT=${WX_CXX_RESULT}")
-    # message(STATUS "WX_CXX_ERROR=${WX_CXX_ERROR}")
-    # message(STATUS "WX_CXX_FLAGS=${WX_CXX_FLAGS}")
-
     execute_process(COMMAND bash -lc "wx-config --cxxflags"
                     OUTPUT_VARIABLE WX_CXX_FLAGS
                     OUTPUT_STRIP_TRAILING_WHITESPACE)
