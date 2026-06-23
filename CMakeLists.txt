@@ -10,12 +10,24 @@ find_program(WX_CONFIG_EXECUTABLE wx-config HINTS /mingw64/bin)
 if(WX_CONFIG_EXECUTABLE)
     message(STATUS "Found wx-config: ${WX_CONFIG_EXECUTABLE}")
 
-    execute_process(COMMAND ${WX_CONFIG_EXECUTABLE} --cxxflags
-                    OUTPUT_VARIABLE WX_CXX_FLAGS
-                    OUTPUT_STRIP_TRAILING_WHITESPACE)
-    execute_process(COMMAND ${WX_CONFIG_EXECUTABLE} --libs core,base
-                    OUTPUT_VARIABLE WX_LIBS
-                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+        COMMAND "${WX_CONFIG_EXECUTABLE}" --cxxflags
+        OUTPUT_VARIABLE WX_CXX_FLAGS
+        ERROR_VARIABLE WX_CXX_ERROR
+        RESULT_VARIABLE WX_CXX_RESULT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    message(STATUS "WX_CXX_RESULT=${WX_CXX_RESULT}")
+    message(STATUS "WX_CXX_ERROR=${WX_CXX_ERROR}")
+    message(STATUS "WX_CXX_FLAGS=${WX_CXX_FLAGS}")
+
+    # execute_process(COMMAND ${WX_CONFIG_EXECUTABLE} --cxxflags
+    #                 OUTPUT_VARIABLE WX_CXX_FLAGS
+    #                 OUTPUT_STRIP_TRAILING_WHITESPACE)
+    # execute_process(COMMAND ${WX_CONFIG_EXECUTABLE} --libs core,base
+    #                 OUTPUT_VARIABLE WX_LIBS
+    #                 OUTPUT_STRIP_TRAILING_WHITESPACE)
 
     separate_arguments(WX_CXX_FLAGS)
     separate_arguments(WX_LIBS)
