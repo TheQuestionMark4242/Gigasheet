@@ -19,6 +19,8 @@ jobs:
           update: true
           install: >
             make
+            zip 
+            unzip
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-wxwidgets3.2-msw
