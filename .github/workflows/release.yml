@@ -1,0 +1,78 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >
+            make
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-wxwidgets3.2-msw
+            mingw-w64-x86_64-boost
+
+      - name: Configure
+        shell: msys2 {0}
+        run: |
+          cmake -G "Unix Makefiles" \
+            -B build \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cmake --build build -j
+
+      - name: Create release directory
+        shell: msys2 {0}
+        run: |
+          mkdir -p release
+          cp build/spreadsheet.exe release/
+
+      - name: Collect runtime DLLs
+        shell: msys2 {0}
+        run: |
+          ldd build/spreadsheet.exe > deps.txt
+
+          grep '/mingw64/bin/.*\.dll' deps.txt \
+            | awk '{print $3}' \
+            | sort -u \
+            | while read dll
+          do
+            cp "$dll" release/
+          done
+
+      - name: Show packaged files
+        shell: msys2 {0}
+        run: |
+          ls -lah release
+
+      - name: Create zip
+        shell: msys2 {0}
+        run: |
+          cd release
+          zip -r ../gigasheet-windows.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gigasheet-windows
+          path: gigasheet-windows.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: gigasheet-windows.zip
