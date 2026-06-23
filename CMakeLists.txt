@@ -11,11 +11,10 @@ if(WX_CONFIG_EXECUTABLE)
     message(STATUS "Found wx-config: ${WX_CONFIG_EXECUTABLE}")
 
     execute_process(
-        COMMAND "${WX_CONFIG_EXECUTABLE}" --cxxflags
+        COMMAND bash -lc "wx-config --cxxflags"
+        RESULT_VARIABLE WX_CXX_RESULT
         OUTPUT_VARIABLE WX_CXX_FLAGS
         ERROR_VARIABLE WX_CXX_ERROR
-        RESULT_VARIABLE WX_CXX_RESULT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
     )
 
     message(STATUS "WX_CXX_RESULT=${WX_CXX_RESULT}")
