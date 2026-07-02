@@ -31,6 +31,7 @@ add_executable(
     src/model/mmapped_table.cpp 
     src/storage/csv_importer.cpp
     src/storage/memory_usage.cpp
+    src/stats/stats_writer.cpp
 )
 
 target_include_directories(

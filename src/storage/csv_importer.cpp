@@ -12,6 +12,8 @@
 #include "csv_importer.hpp"
 
 #include "../model/column_types.hpp"
+#include "../stats/chunk_stats.hpp"
+#include "../stats/stats_writer.hpp"
 
 namespace fs = std::filesystem;
 
@@ -98,10 +100,11 @@ void WriteMetadata(std::ofstream& meta, const std::vector<std::string>& headerRo
     }
 }
 
-void WriteDataFiles(
+size_t WriteDataFiles(
     csv::CSVReader& reader,
     const fs::path& outputDir,
-    const std::vector<ColumnType>& types
+    const std::vector<ColumnType>& types,
+    std::vector<ChunkAccumulator>& accumulators
 ) {
     std::vector<std::ofstream> outs;
     outs.reserve(types.size());
@@ -174,15 +177,18 @@ void WriteDataFiles(
 
     csv::CSVRow row;
     size_t bufferedRows = 0;
+    size_t totalRows = 0;
     while (reader.read_row(row)) {
         for (size_t col = 0; col < types.size(); ++col) {
             if (col >= row.size()) {
                 switch (types[col]) {
                     case ColumnType::INT32:
                         intBuffers[col].push_back(0);
+                        accumulators[col].Add(int32_t{0});
                         break;
                     case ColumnType::DOUBLE:
                         doubleBuffers[col].push_back(0.0);
+                        accumulators[col].Add(0.0);
                         break;
                     case ColumnType::CHARBUF:
                         charBuffers[col].push_back(std::array<char, 64>{});
@@ -198,6 +204,7 @@ void WriteDataFiles(
                     int32_t value = 0;
                     field.try_get(value);
                     intBuffers[col].push_back(value);
+                    accumulators[col].Add(value);
                     break;
                 }
                 case ColumnType::DOUBLE:
@@ -205,6 +212,7 @@ void WriteDataFiles(
                     double value = 0.0;
                     field.try_get(value);
                     doubleBuffers[col].push_back(value);
+                    accumulators[col].Add(value);
                     break;
                 }
                 case ColumnType::CHARBUF:
@@ -214,6 +222,7 @@ void WriteDataFiles(
         }
 
         ++bufferedRows;
+        ++totalRows;
         if (bufferedRows >= kFlushRows) {
             flushBuffers();
             bufferedRows = 0;
@@ -221,6 +230,7 @@ void WriteDataFiles(
     }
 
     flushBuffers();
+    return totalRows;
 }
 
 csv::CSVFormat MakeFormat() {
@@ -268,8 +278,16 @@ std::filesystem::path ImportCsv(
         }
     }
 
+    std::vector<ChunkAccumulator> accumulators;
+    accumulators.reserve(types.size());
+    for (ColumnType type : types) {
+        accumulators.emplace_back(type);
+    }
+
     auto writeReader = csv::CSVReader(inputPath.string(), format);
-    WriteDataFiles(writeReader, outputDir, types);
+    const size_t totalRows = WriteDataFiles(writeReader, outputDir, types, accumulators);
+
+    WriteStatsFiles(outputDir, accumulators, totalRows);
 
     return outputDir;
 }
