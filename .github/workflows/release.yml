@@ -22,8 +22,10 @@ jobs:
           update: true
           install: >
             make
-            zip 
+            zip
             unzip
+            flex
+            bison
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-wxwidgets3.2-msw
