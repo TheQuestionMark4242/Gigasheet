@@ -125,46 +125,65 @@ void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
         return;
     }
 
-    // Column names (and A..Z aliases) visible to the expression.
-    exprparse::ColumnMap columnMap;
+    // Column names (and A..Z aliases) visible to the expression. Numeric
+    // columns evaluate to doubles, CHARBUF columns to strings.
+    exprparse::TypedColumnMap columnMap;
     for (size_t i = 0; i < columns.size(); ++i) {
         Column& c = columns[i];
         const std::string alias = (i < 26) ? std::string(1, static_cast<char>('A' + static_cast<char>(i))) : std::string{};
 
-        auto registerColumn = [&](const std::string& key, auto fn) {
+        auto registerColumn = [&](const std::string& key, exprparse::TypedFn fn) {
             if (!key.empty()) {
                 columnMap[key] = std::move(fn);
             }
         };
 
-        // Each mapped function must produce a double for evaluator
         if (c.type == ColumnType::INT32) {
             auto f = std::get<FnInt>(c.fn); // safe
-            registerColumn(c.label, [f](int row) -> double { return static_cast<double>(f(row)); });
-            registerColumn(alias, [f](int row) -> double { return static_cast<double>(f(row)); });
+            exprparse::FnNum fn = [f](int row) -> double { return static_cast<double>(f(row)); };
+            registerColumn(c.label, fn);
+            registerColumn(alias, fn);
         } else if (c.type == ColumnType::DOUBLE) {
             auto f = std::get<FnDbl>(c.fn);
-            registerColumn(c.label, [f](int row) -> double { return f(row); });
-            registerColumn(alias, [f](int row) -> double { return f(row); });
-        } else { // char_buf -> we return 0.0 (string ops not supported yet)
-            registerColumn(c.label, [](int){ return 0.0; });
-            registerColumn(alias, [](int){ return 0.0; });
+            exprparse::FnNum fn = [f](int row) -> double { return f(row); };
+            registerColumn(c.label, fn);
+            registerColumn(alias, fn);
+        } else { // CHARBUF
+            auto f = std::get<FnChar>(c.fn);
+            exprparse::FnStr fn = [f](int row) -> std::string {
+                char_buf b = f(row);
+                b[63] = '\0';
+                return std::string(b.data());
+            };
+            registerColumn(c.label, fn);
+            registerColumn(alias, fn);
         }
     }
 
-    exprparse::CompileResult compiled = exprparse::CompileNumeric(*parsed.root, columnMap);
+    exprparse::TypedCompileResult compiled = exprparse::CompileTyped(*parsed.root, columnMap);
     if (!compiled.fn) {
         wxMessageBox("Error in expression: " + expr + "\n" + compiled.error,
                      "Expression Error", wxICON_ERROR);
         return;
     }
-    std::function<double(int)> derived = compiled.fn;
 
-    // push derived column as a DOUBLE-returning callable
     Column dc;
-    dc.type = ColumnType::DOUBLE;
     dc.label = "D" + std::to_string(derivedColumns.size());
-    dc.fn = FnDbl([derived](int row) -> double { return derived(row); });
+    if (auto* fnum = std::get_if<exprparse::FnNum>(&*compiled.fn)) {
+        dc.type = ColumnType::DOUBLE;
+        dc.fn = FnDbl(*fnum);
+    } else {
+        // String-valued expression -> CHARBUF column, truncated to 63 chars.
+        exprparse::FnStr fstr = std::get<exprparse::FnStr>(*compiled.fn);
+        dc.type = ColumnType::CHARBUF;
+        dc.fn = FnChar([fstr](int row) -> char_buf {
+            char_buf b{};
+            const std::string s = fstr(row);
+            const size_t n = std::min(s.size(), b.size() - 1);
+            std::copy_n(s.data(), n, b.data());
+            return b;
+        });
+    }
 
     derivedColumns.push_back(dc);
 

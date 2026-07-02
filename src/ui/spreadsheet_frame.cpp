@@ -137,7 +137,11 @@ void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
 }
 
 void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
-    wxTextEntryDialog dlg(this, "Enter expression like =A + B*2 or =\"My Column\" + 5", "Add Derived Column");
+    wxTextEntryDialog dlg(this,
+        "Enter expression like =A + B*2, =sqrt(A*A+B*B) or =CONCATENATE(Name, ' - ', A)\n"
+        "Use \"...\" for column names with spaces and '...' for text literals.\n"
+        "String functions: CONCATENATE, LEFT(s,n), RIGHT(s,n), MID(s,start,len), LEN(s)",
+        "Add Derived Column");
     if (dlg.ShowModal() == wxID_OK) {
         wxString expr = dlg.GetValue();
         table->AddDerivedColumn(expr, grid);

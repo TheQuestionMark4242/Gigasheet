@@ -36,6 +36,7 @@
 %token <double> NUMBER "number"
 %token <std::string> IDENT "identifier"
 %token <std::string> QIDENT "quoted column name"
+%token <std::string> STRING "string literal"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/"
 %token LPAREN "(" RPAREN ")"
 %token COMMA ","
@@ -57,6 +58,7 @@ expr:
     NUMBER              { $$ = exprparse::MakeNode(exprparse::NumberLit{$1}); }
   | IDENT               { $$ = exprparse::MakeNode(exprparse::ColumnRef{std::move($1)}); }
   | QIDENT              { $$ = exprparse::MakeNode(exprparse::ColumnRef{std::move($1)}); }
+  | STRING              { $$ = exprparse::MakeNode(exprparse::StringLit{std::move($1)}); }
   | expr "+" expr       { $$ = exprparse::MakeNode(exprparse::Binary{'+', std::move($1), std::move($3)}); }
   | expr "-" expr       { $$ = exprparse::MakeNode(exprparse::Binary{'-', std::move($1), std::move($3)}); }
   | expr "*" expr       { $$ = exprparse::MakeNode(exprparse::Binary{'*', std::move($1), std::move($3)}); }

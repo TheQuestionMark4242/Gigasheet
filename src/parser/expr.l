@@ -32,6 +32,10 @@
         return exprparse::Parser::make_QIDENT(std::string(yytext + 1, yyleng - 2));
     }
 
+'[^']*'                                 {
+        return exprparse::Parser::make_STRING(std::string(yytext + 1, yyleng - 2));
+    }
+
 "+"                                     { return exprparse::Parser::make_PLUS(); }
 "-"                                     { return exprparse::Parser::make_MINUS(); }
 "*"                                     { return exprparse::Parser::make_STAR(); }
