@@ -34,7 +34,8 @@ StatsResult ComputeStats(
     const Column& column,
     const std::vector<ChunkRecord>* records,
     int rowBegin,
-    int rowEnd)
+    int rowEnd,
+    const std::unordered_set<std::int64_t>* dirtyChunks)
 {
     StatsResult r;
     if (rowBegin < 0 || rowEnd < rowBegin) {
@@ -63,7 +64,8 @@ StatsResult ComputeStats(
             const std::int64_t chunkStart = c * cs;
             const std::int64_t chunkEnd = chunkStart + static_cast<std::int64_t>(rec.count) - 1;
 
-            if (rowBegin <= chunkStart && chunkEnd <= rowEnd) {
+            const bool dirty = dirtyChunks && dirtyChunks->count(c) != 0;
+            if (rowBegin <= chunkStart && chunkEnd <= rowEnd && !dirty) {
                 if (r.intSum) {
                     r.isum += rec.sum.i;
                 } else {

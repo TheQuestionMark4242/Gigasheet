@@ -15,7 +15,9 @@ private:
     void OnAddColumn(wxCommandEvent&);
     void OnStatistics(wxCommandEvent&);
     void OnTimer(wxTimerEvent&);
-    
+    void UpdateStatus();
+
+
     wxTimer memoryTimer;
     wxGrid* grid = nullptr;
     MmappedTable* table = nullptr;

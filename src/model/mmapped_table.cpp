@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <limits>
 #include <fstream>
 #include <functional>
 #include <string>
@@ -52,7 +54,9 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
         }
     }
 
-    // load columns: mmap each file, create callable that returns element by index
+    // load columns: mmap each file, create callable that returns element by
+    // index (checking the unsaved-edit overrides first)
+    overrides.resize(numCols);
     for (int i = 0; i < numCols; ++i) {
         fs::path p = fs::path(dirPath) / (std::to_string(i) + ".bin");
         mio::mmap_source mm(p.string());
@@ -71,7 +75,15 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
             Column col;
             col.type = ColumnType::INT32;
             col.label = labels[i];
-            col.fn = FnInt([ptr](int row) -> int32_t { return ptr[row]; });
+            col.fn = FnInt([this, i, ptr](int row) -> int32_t {
+                const auto& ov = overrides[i];
+                if (!ov.empty()) {
+                    if (auto it = ov.find(row); it != ov.end()) {
+                        return std::get<int32_t>(it->second);
+                    }
+                }
+                return ptr[row];
+            });
             columns.push_back(std::move(col));
         }
         else if (types[i] == ColumnType::DOUBLE) {
@@ -81,7 +93,15 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
             Column col;
             col.type = ColumnType::DOUBLE;
             col.label = labels[i];
-            col.fn = FnDbl([ptr](int row) -> double { return ptr[row]; });
+            col.fn = FnDbl([this, i, ptr](int row) -> double {
+                const auto& ov = overrides[i];
+                if (!ov.empty()) {
+                    if (auto it = ov.find(row); it != ov.end()) {
+                        return std::get<double>(it->second);
+                    }
+                }
+                return ptr[row];
+            });
             columns.push_back(std::move(col));
         }
         else { // CHARBUF
@@ -91,7 +111,15 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
             Column col;
             col.type = ColumnType::CHARBUF;
             col.label = labels[i];
-            col.fn = FnChar([ptr](int row) -> char_buf { return ptr[row]; });
+            col.fn = FnChar([this, i, ptr](int row) -> char_buf {
+                const auto& ov = overrides[i];
+                if (!ov.empty()) {
+                    if (auto it = ov.find(row); it != ov.end()) {
+                        return std::get<char_buf>(it->second);
+                    }
+                }
+                return ptr[row];
+            });
             columns.push_back(std::move(col));
         }
     }
@@ -110,7 +138,34 @@ StatsResult MmappedTable::ComputeColumnStats(int col, int rowBegin, int rowEnd) 
 
     const std::vector<ChunkRecord>* records =
         HasChunkStats(col) ? &statsIndex.Records(col) : nullptr;
-    return ComputeStats(columns[col], records, rowBegin, rowEnd);
+    const std::unordered_set<std::int64_t> dirty = DirtyChunks(col);
+    return ComputeStats(columns[col], records, rowBegin, rowEnd,
+                        dirty.empty() ? nullptr : &dirty);
+}
+
+std::unordered_set<std::int64_t> MmappedTable::DirtyChunks(int col) const {
+    std::unordered_set<std::int64_t> dirty;
+    if (col >= 0 && col < static_cast<int>(overrides.size())) {
+        for (const auto& [row, value] : overrides[col]) {
+            dirty.insert(row / static_cast<std::int64_t>(kChunkSize));
+        }
+    }
+    return dirty;
+}
+
+bool MmappedTable::HasUnsavedChanges() const {
+    for (const auto& m : overrides) {
+        if (!m.empty()) return true;
+    }
+    return false;
+}
+
+std::size_t MmappedTable::UnsavedCellCount() const {
+    std::size_t n = 0;
+    for (const auto& m : overrides) {
+        n += m.size();
+    }
+    return n;
 }
 
 exprparse::TypedColumnMap MmappedTable::BuildColumnMap() const {
@@ -300,8 +355,60 @@ wxString MmappedTable::GetValue(int row, int col) {
     }, c.fn);
 }
 
-void MmappedTable::SetValue(int, int, const wxString&) {
-    /* readonly for now */
+void MmappedTable::SetValue(int row, int col, const wxString& value) {
+    if (row < 0 || row >= rows || col < 0 || col >= static_cast<int>(columns.size())) {
+        return;
+    }
+    if (col >= numBaseCols) {
+        wxMessageBox("Derived columns are computed from their formula; edit the input columns instead.",
+                     "Read-only column", wxICON_WARNING);
+        return;
+    }
+
+    const Column& c = columns[col];
+    const char* base = mmaps[col].data();
+    CellOverride ov;
+    bool sameAsFile = false;
+
+    if (c.type == ColumnType::INT32) {
+        long v = 0;
+        if (!value.ToLong(&v) ||
+            v < std::numeric_limits<std::int32_t>::min() ||
+            v > std::numeric_limits<std::int32_t>::max())
+        {
+            wxMessageBox("\"" + value + "\" is not a valid 32-bit integer.",
+                         "Invalid value", wxICON_ERROR);
+            return;
+        }
+        const auto iv = static_cast<std::int32_t>(v);
+        sameAsFile = reinterpret_cast<const std::int32_t*>(base)[row] == iv;
+        ov = iv;
+    } else if (c.type == ColumnType::DOUBLE) {
+        double d = 0.0;
+        if (!value.ToDouble(&d)) {
+            wxMessageBox("\"" + value + "\" is not a valid number.",
+                         "Invalid value", wxICON_ERROR);
+            return;
+        }
+        const double fileVal = reinterpret_cast<const double*>(base)[row];
+        sameAsFile = std::memcmp(&fileVal, &d, sizeof(double)) == 0;
+        ov = d;
+    } else { // CHARBUF, truncated to 63 bytes + NUL
+        char_buf b{};
+        const std::string s = value.utf8_string();
+        const size_t n = std::min(s.size(), b.size() - 1);
+        std::copy_n(s.data(), n, b.data());
+        const char_buf& fileVal = reinterpret_cast<const char_buf*>(base)[row];
+        sameAsFile = std::memcmp(fileVal.data(), b.data(), b.size()) == 0;
+        ov = b;
+    }
+
+    // Keep the map sparse: typing the on-disk value back reverts the cell.
+    if (sameAsFile) {
+        overrides[col].erase(row);
+    } else {
+        overrides[col][row] = ov;
+    }
 }
 
 wxString MmappedTable::GetColLabelValue(int col) {

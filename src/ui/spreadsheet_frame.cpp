@@ -63,15 +63,9 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     grid = new wxGrid(this, wxID_ANY);
     table = new MmappedTable(dir.ToStdString());
     grid->SetTable(table, true, wxGrid::wxGridSelectCells);
-    
-    SetStatusText(
-        wxString::Format(
-            "Rows: %d | Columns: %d | RAM: %.1f MB",
-            table->GetNumberRows(),
-            table->GetNumberCols(),
-            get_memory_usage_MB()
-        )
-    );
+    grid->EnableEditing(true);
+
+    UpdateStatus();
     memoryTimer.SetOwner(this);
 
     Bind(
@@ -87,12 +81,22 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
 }
 
 void SpreadsheetFrame::OnTimer(wxTimerEvent&) {
-    SetStatusText(
-        wxString::Format(
-            "Rows: %d | Columns: %d | RAM: %.1f MB",
-            table->GetNumberRows(),
-            table->GetNumberCols(),
-            get_memory_usage_MB()));
+    UpdateStatus();
+}
+
+void SpreadsheetFrame::UpdateStatus() {
+    wxString text = wxString::Format(
+        "Rows: %d | Columns: %d | RAM: %.1f MB",
+        table->GetNumberRows(),
+        table->GetNumberCols(),
+        get_memory_usage_MB());
+
+    const size_t unsaved = table->UnsavedCellCount();
+    if (unsaved > 0) {
+        text += wxString::Format(" | Unsaved edits: %zu", unsaved);
+    }
+    SetStatusText(text);
+    SetTitle(unsaved > 0 ? "Spreadsheet *" : "Spreadsheet");
 }
 
 void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {

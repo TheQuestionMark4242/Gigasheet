@@ -1,6 +1,10 @@
-#pragma once 
+#pragma once
 
+#include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <variant>
 #include <vector>
 
 #include <wx/grid.h>
@@ -42,6 +46,10 @@ public:
         return col < numBaseCols && statsIndex.HasStats(col);
     }
 
+    // Unsaved sparse cell edits (kept in memory until Save).
+    bool HasUnsavedChanges() const;
+    std::size_t UnsavedCellCount() const;
+
     // -------- wxGridTableBase overrides ----------
     int GetNumberRows() override;
     int GetNumberCols() override;
@@ -59,8 +67,18 @@ private:
     // Matches BuildColumnMap precedence (a later registration wins).
     int FindColumn(const std::string& name) const;
 
+    // Chunk ids of the given base column that contain unsaved edits (their
+    // precomputed stats records reflect the on-disk data, not the edits).
+    std::unordered_set<std::int64_t> DirtyChunks(int col) const;
+
+    using CellOverride = std::variant<std::int32_t, double, char_buf>;
+
     std::vector<mio::mmap_source> mmaps;   // keep mmaps alive
     std::vector<Column> columns;           // base + derived (in the same vector)
+    // Per base column: row -> unsaved edited value, overriding the mmap.
+    // Column fns consult this map, so the grid, derived columns and
+    // statistics all see unsaved edits.
+    std::vector<std::unordered_map<int, CellOverride>> overrides;
     std::vector<Column> derivedColumns;    // keep derived for metadata if needed
     ColumnStatsIndex statsIndex;           // per-chunk stats for base columns
     int numBaseCols = 0;                   // columns backed by files (not derived)

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <unordered_set>
 #include <vector>
 
 #include "../model/column_types.hpp"
@@ -24,12 +25,15 @@ struct StatsResult {
 // numeric column. If records is non-null, fully covered chunks are folded
 // from the precomputed stats and only the partial boundary chunks are
 // scanned through the column function; otherwise the whole range is scanned.
+// Chunks listed in dirtyChunks (unsaved cell edits) are scanned instead of
+// folded, since their records reflect the on-disk data.
 // CHARBUF columns get count only (valid == false, count set).
 StatsResult ComputeStats(
     const Column& column,
     const std::vector<ChunkRecord>* records,
     int rowBegin,
-    int rowEnd);
+    int rowEnd,
+    const std::unordered_set<std::int64_t>* dirtyChunks = nullptr);
 
 // Computes SUM/MIN/MAX/COUNT over rows [rowBegin, rowEnd] (inclusive) of an
 // arbitrary numeric row function (e.g. a compiled formula). Always a full
