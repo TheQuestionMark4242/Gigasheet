@@ -50,6 +50,12 @@ public:
     bool HasUnsavedChanges() const;
     std::size_t UnsavedCellCount() const;
 
+    // Writes all unsaved edits into the column files in place, refreshes
+    // the stats records of the affected chunks (on disk and in memory) and
+    // clears the override map. Returns false with errorOut set on failure;
+    // unwritten edits are kept.
+    bool SaveOverrides(std::string& errorOut);
+
     // -------- wxGridTableBase overrides ----------
     int GetNumberRows() override;
     int GetNumberCols() override;
@@ -81,6 +87,7 @@ private:
     std::vector<std::unordered_map<int, CellOverride>> overrides;
     std::vector<Column> derivedColumns;    // keep derived for metadata if needed
     ColumnStatsIndex statsIndex;           // per-chunk stats for base columns
+    std::string dirPath;                   // table directory (for Save)
     int numBaseCols = 0;                   // columns backed by files (not derived)
     int rows = 0;
 };

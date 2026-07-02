@@ -30,6 +30,12 @@ public:
         return perColumn_[col];
     }
 
+    // For refreshing records after saved cell edits. Clearing a column's
+    // records disables its stats (falls back to full scans).
+    std::vector<ChunkRecord>& MutableRecords(int col) {
+        return perColumn_[col];
+    }
+
 private:
     std::vector<std::vector<ChunkRecord>> perColumn_;
 };

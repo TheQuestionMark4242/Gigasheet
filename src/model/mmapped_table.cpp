@@ -125,8 +125,93 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
     }
 
     numBaseCols = numCols;
+    this->dirPath = dirPath;
     statsIndex = ColumnStatsIndex::Load(
         fs::path(dirPath), numCols, static_cast<std::uint64_t>(rows));
+}
+
+bool MmappedTable::SaveOverrides(std::string& errorOut) {
+    errorOut.clear();
+    // Header size of <col>.stats.bin; records follow (see chunk_stats.hpp).
+    constexpr std::streamoff kStatsHeaderSize = 24;
+
+    for (int col = 0; col < numBaseCols; ++col) {
+        auto& ov = overrides[col];
+        if (ov.empty()) continue;
+
+        const Column& c = columns[col];
+        const std::unordered_set<std::int64_t> dirty = DirtyChunks(col);
+
+        // 1. Patch the column data file in place. The read-only mapping stays
+        //    live: mio opens with FILE_SHARE_WRITE and mapped views are
+        //    coherent with writes through a second handle on local files.
+        const fs::path dataPath = fs::path(dirPath) / (std::to_string(col) + ".bin");
+        std::fstream f(dataPath, std::ios::in | std::ios::out | std::ios::binary);
+        if (!f) {
+            errorOut = "Failed to open for writing: " + dataPath.string();
+            return false; // overrides kept, nothing lost
+        }
+        const std::streamoff stride =
+            c.type == ColumnType::INT32 ? sizeof(std::int32_t) :
+            c.type == ColumnType::DOUBLE ? sizeof(double) : sizeof(char_buf);
+        for (const auto& [row, value] : ov) {
+            f.seekp(static_cast<std::streamoff>(row) * stride);
+            std::visit([&f](const auto& v) {
+                f.write(reinterpret_cast<const char*>(&v), sizeof(v));
+            }, value);
+        }
+        f.flush();
+        if (!f) {
+            errorOut = "Write failed: " + dataPath.string();
+            return false; // overrides kept; a partial patch is re-written next Save
+        }
+        ov.clear(); // column fns now read the patched bytes from the mmap
+
+        // 2. Refresh the stats records of the edited chunks (in memory and
+        //    on disk) by rescanning those chunks through the column fn.
+        if (!HasChunkStats(col)) continue;
+
+        auto& records = statsIndex.MutableRecords(col);
+        const fs::path statsPath =
+            fs::path(dirPath) / (std::to_string(col) + kStatsFileSuffix);
+        std::fstream sf(statsPath, std::ios::in | std::ios::out | std::ios::binary);
+        if (!sf) {
+            // Data is saved but stats can't be refreshed: drop this column's
+            // stats (full scans stay correct) and report the problem.
+            records.clear();
+            errorOut = "Cell edits saved, but failed to update " + statsPath.string()
+                + "; the stats index for this column is disabled.";
+            return false;
+        }
+
+        for (const std::int64_t chunk : dirty) {
+            if (chunk < 0 || chunk >= static_cast<std::int64_t>(records.size())) continue;
+
+            ChunkAccumulator acc(c.type);
+            const int begin = static_cast<int>(chunk * kChunkSize);
+            const int end = begin + static_cast<int>(records[chunk].count);
+            if (c.type == ColumnType::INT32) {
+                const auto& fn = std::get<FnInt>(c.fn);
+                for (int r = begin; r < end; ++r) acc.Add(fn(r));
+            } else {
+                const auto& fn = std::get<FnDbl>(c.fn);
+                for (int r = begin; r < end; ++r) acc.Add(fn(r));
+            }
+            const ChunkRecord rec = acc.Finish().front();
+
+            records[chunk] = rec;
+            sf.seekp(kStatsHeaderSize + chunk * static_cast<std::streamoff>(sizeof(ChunkRecord)));
+            sf.write(reinterpret_cast<const char*>(&rec), sizeof(rec));
+        }
+        sf.flush();
+        if (!sf) {
+            records.clear();
+            errorOut = "Cell edits saved, but failed to update " + statsPath.string()
+                + "; the stats index for this column is disabled.";
+            return false;
+        }
+    }
+    return true;
 }
 
 StatsResult MmappedTable::ComputeColumnStats(int col, int rowBegin, int rowEnd) const {

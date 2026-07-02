@@ -12,10 +12,13 @@ public:
 
 private:
     void OnOpenCsv(wxCommandEvent&);
+    void OnSave(wxCommandEvent&);
     void OnAddColumn(wxCommandEvent&);
     void OnStatistics(wxCommandEvent&);
+    void OnClose(wxCloseEvent&);
     void OnTimer(wxTimerEvent&);
     void UpdateStatus();
+    bool DoSave();
 
 
     wxTimer memoryTimer;

@@ -51,13 +51,16 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     // toolbar
     wxToolBar* toolbar = CreateToolBar();
     toolbar->AddTool(wxID_OPEN, "Open CSV", wxArtProvider::GetBitmap(wxART_FILE_OPEN));
+    toolbar->AddTool(wxID_SAVE, "Save", wxArtProvider::GetBitmap(wxART_FILE_SAVE));
     toolbar->AddTool(wxID_ADD, "Add Column", wxArtProvider::GetBitmap(wxART_PLUS));
     toolbar->AddTool(kStatisticsToolId, "Statistics", wxArtProvider::GetBitmap(wxART_REPORT_VIEW));
     toolbar->Realize();
 
     Bind(wxEVT_TOOL, &SpreadsheetFrame::OnOpenCsv, this, wxID_OPEN);
+    Bind(wxEVT_TOOL, &SpreadsheetFrame::OnSave, this, wxID_SAVE);
     Bind(wxEVT_TOOL, &SpreadsheetFrame::OnAddColumn, this, wxID_ADD);
     Bind(wxEVT_TOOL, &SpreadsheetFrame::OnStatistics, this, kStatisticsToolId);
+    Bind(wxEVT_CLOSE_WINDOW, &SpreadsheetFrame::OnClose, this);
 
     // grid
     grid = new wxGrid(this, wxID_ANY);
@@ -133,6 +136,45 @@ void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
             wxICON_ERROR | wxOK,
             this);
     }
+}
+
+void SpreadsheetFrame::OnSave(wxCommandEvent&) {
+    DoSave();
+}
+
+bool SpreadsheetFrame::DoSave() {
+    if (!table->HasUnsavedChanges()) {
+        SetStatusText("No unsaved changes.");
+        return true;
+    }
+    // Commit any in-progress cell editor so its value is saved too.
+    grid->SaveEditControlValue();
+
+    const size_t count = table->UnsavedCellCount();
+    wxBusyCursor busy;
+    std::string error;
+    if (!table->SaveOverrides(error)) {
+        wxMessageBox(error, "Save Failed", wxICON_ERROR, this);
+        UpdateStatus();
+        return false;
+    }
+    UpdateStatus();
+    SetStatusText(wxString::Format("Saved %zu cell edit(s).", count));
+    return true;
+}
+
+void SpreadsheetFrame::OnClose(wxCloseEvent& event) {
+    if (table && table->HasUnsavedChanges() && event.CanVeto()) {
+        const int rc = wxMessageBox(
+            "There are unsaved cell edits. Save them before closing?",
+            "Unsaved Changes",
+            wxYES_NO | wxCANCEL | wxICON_QUESTION, this);
+        if (rc == wxCANCEL || (rc == wxYES && !DoSave())) {
+            event.Veto();
+            return;
+        }
+    }
+    event.Skip();
 }
 
 void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
