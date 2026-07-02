@@ -10,8 +10,8 @@
 
 #include <wx/msgdlg.h>
 
-#include "../parser/ast.hpp"
-#include "../parser/parser.cpp"
+#include "../parser/expr_eval.hpp"
+#include "../parser/parser_driver.hpp"
 
 namespace fs = std::filesystem;
 
@@ -118,25 +118,22 @@ void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
     std::string s = expr.ToStdString();
     if (!s.empty() && s[0] == '=') s = s.substr(1);
 
-    using iterator_type = std::string::const_iterator;
-    client::ast::program program;
-    iterator_type iter = s.begin(), end = s.end();
-    boost::spirit::x3::ascii::space_type space;
-    bool ok = phrase_parse(iter, end, client::calculator, space, program);
-    if (!ok || iter != end) {
-        wxMessageBox("Parse error in expression: " + expr, "Parse Error", wxICON_ERROR);
+    exprparse::ParseResult parsed = exprparse::Parse(s);
+    if (!parsed.root) {
+        wxMessageBox("Parse error in expression: " + expr + "\n" + parsed.error,
+                     "Parse Error", wxICON_ERROR);
         return;
     }
 
-    // Build temporary column_map used by parser evaluator.
-    column_map.clear();
+    // Column names (and A..Z aliases) visible to the expression.
+    exprparse::ColumnMap columnMap;
     for (size_t i = 0; i < columns.size(); ++i) {
         Column& c = columns[i];
         const std::string alias = (i < 26) ? std::string(1, static_cast<char>('A' + static_cast<char>(i))) : std::string{};
 
         auto registerColumn = [&](const std::string& key, auto fn) {
             if (!key.empty()) {
-                column_map[key] = std::move(fn);
+                columnMap[key] = std::move(fn);
             }
         };
 
@@ -155,9 +152,13 @@ void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
         }
     }
 
-    // Evaluate AST -> std::function<double(int)>
-    client::ast::eval evaluator;
-    std::function<double(int)> derived = evaluator(program);
+    exprparse::CompileResult compiled = exprparse::CompileNumeric(*parsed.root, columnMap);
+    if (!compiled.fn) {
+        wxMessageBox("Error in expression: " + expr + "\n" + compiled.error,
+                     "Expression Error", wxICON_ERROR);
+        return;
+    }
+    std::function<double(int)> derived = compiled.fn;
 
     // push derived column as a DOUBLE-returning callable
     Column dc;
