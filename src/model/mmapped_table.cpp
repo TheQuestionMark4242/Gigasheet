@@ -113,23 +113,12 @@ StatsResult MmappedTable::ComputeColumnStats(int col, int rowBegin, int rowEnd) 
     return ComputeStats(columns[col], records, rowBegin, rowEnd);
 }
 
-void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
-    // parse expression (strip leading '=' if present)
-    std::string s = expr.ToStdString();
-    if (!s.empty() && s[0] == '=') s = s.substr(1);
-
-    exprparse::ParseResult parsed = exprparse::Parse(s);
-    if (!parsed.root) {
-        wxMessageBox("Parse error in expression: " + expr + "\n" + parsed.error,
-                     "Parse Error", wxICON_ERROR);
-        return;
-    }
-
-    // Column names (and A..Z aliases) visible to the expression. Numeric
+exprparse::TypedColumnMap MmappedTable::BuildColumnMap() const {
+    // Column names (and A..Z aliases) visible to expressions. Numeric
     // columns evaluate to doubles, CHARBUF columns to strings.
     exprparse::TypedColumnMap columnMap;
     for (size_t i = 0; i < columns.size(); ++i) {
-        Column& c = columns[i];
+        const Column& c = columns[i];
         const std::string alias = (i < 26) ? std::string(1, static_cast<char>('A' + static_cast<char>(i))) : std::string{};
 
         auto registerColumn = [&](const std::string& key, exprparse::TypedFn fn) {
@@ -159,8 +148,90 @@ void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
             registerColumn(alias, fn);
         }
     }
+    return columnMap;
+}
 
-    exprparse::TypedCompileResult compiled = exprparse::CompileTyped(*parsed.root, columnMap);
+int MmappedTable::FindColumn(const std::string& name) const {
+    int found = -1;
+    for (size_t i = 0; i < columns.size(); ++i) {
+        if (columns[i].label == name) {
+            found = static_cast<int>(i); // last label match wins, like the map
+        }
+    }
+    if (found >= 0) {
+        return found;
+    }
+    if (name.size() == 1 && name[0] >= 'A' && name[0] <= 'Z') {
+        const int idx = name[0] - 'A';
+        if (idx < static_cast<int>(columns.size())) {
+            return idx;
+        }
+    }
+    return -1;
+}
+
+StatsResult MmappedTable::ComputeFormulaStats(
+    const std::string& expr, int rowBegin, int rowEnd,
+    std::string& errorOut) const
+{
+    errorOut.clear();
+    std::string s = expr;
+    if (!s.empty() && s[0] == '=') s = s.substr(1);
+
+    exprparse::ParseResult parsed = exprparse::Parse(s);
+    if (!parsed.root) {
+        errorOut = parsed.error;
+        return {};
+    }
+
+    if (rows == 0) {
+        return {};
+    }
+    rowBegin = std::max(rowBegin, 0);
+    rowEnd = std::min(rowEnd, rows - 1);
+    if (rowEnd < rowBegin) {
+        return {};
+    }
+
+    // Bare column reference: use the chunk index via the column path.
+    if (const auto* ref = std::get_if<exprparse::ColumnRef>(&parsed.root->value)) {
+        const int col = FindColumn(ref->name);
+        if (col >= 0) {
+            return ComputeColumnStats(col, rowBegin, rowEnd);
+        }
+        // Unknown name falls through to CompileTyped for its error message.
+    }
+
+    exprparse::TypedCompileResult compiled =
+        exprparse::CompileTyped(*parsed.root, BuildColumnMap());
+    if (!compiled.fn) {
+        errorOut = compiled.error;
+        return {};
+    }
+
+    if (const auto* fn = std::get_if<exprparse::FnNum>(&*compiled.fn)) {
+        return ScanFn(*fn, rowBegin, rowEnd);
+    }
+
+    // String-valued formula: count only (valid stays false).
+    StatsResult r;
+    r.count = static_cast<std::uint64_t>(rowEnd) - rowBegin + 1;
+    return r;
+}
+
+void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
+    // parse expression (strip leading '=' if present)
+    std::string s = expr.ToStdString();
+    if (!s.empty() && s[0] == '=') s = s.substr(1);
+
+    exprparse::ParseResult parsed = exprparse::Parse(s);
+    if (!parsed.root) {
+        wxMessageBox("Parse error in expression: " + expr + "\n" + parsed.error,
+                     "Parse Error", wxICON_ERROR);
+        return;
+    }
+
+    exprparse::TypedCompileResult compiled = exprparse::CompileTyped(*parsed.root, BuildColumnMap());
     if (!compiled.fn) {
         wxMessageBox("Error in expression: " + expr + "\n" + compiled.error,
                      "Expression Error", wxICON_ERROR);

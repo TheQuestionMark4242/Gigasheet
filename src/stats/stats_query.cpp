@@ -90,3 +90,26 @@ StatsResult ComputeStats(
     r.valid = true;
     return r;
 }
+
+StatsResult ScanFn(
+    const std::function<double(int)>& fn,
+    int rowBegin,
+    int rowEnd)
+{
+    StatsResult r;
+    if (rowBegin < 0 || rowEnd < rowBegin) {
+        return r;
+    }
+    r.count = static_cast<std::uint64_t>(rowEnd) - rowBegin + 1;
+    r.min = std::numeric_limits<double>::infinity();
+    r.max = -std::numeric_limits<double>::infinity();
+
+    for (int i = rowBegin; i <= rowEnd; ++i) {
+        const double d = fn(i);
+        r.sum += d;
+        if (d < r.min) r.min = d;
+        if (d > r.max) r.max = d;
+    }
+    r.valid = true;
+    return r;
+}

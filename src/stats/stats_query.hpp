@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "../model/column_types.hpp"
@@ -27,5 +28,13 @@ struct StatsResult {
 StatsResult ComputeStats(
     const Column& column,
     const std::vector<ChunkRecord>* records,
+    int rowBegin,
+    int rowEnd);
+
+// Computes SUM/MIN/MAX/COUNT over rows [rowBegin, rowEnd] (inclusive) of an
+// arbitrary numeric row function (e.g. a compiled formula). Always a full
+// scan; the sum is accumulated in double (intSum == false).
+StatsResult ScanFn(
+    const std::function<double(int)>& fn,
     int rowBegin,
     int rowEnd);
