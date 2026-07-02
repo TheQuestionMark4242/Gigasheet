@@ -95,6 +95,22 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
             columns.push_back(std::move(col));
         }
     }
+
+    numBaseCols = numCols;
+    statsIndex = ColumnStatsIndex::Load(
+        fs::path(dirPath), numCols, static_cast<std::uint64_t>(rows));
+}
+
+StatsResult MmappedTable::ComputeColumnStats(int col, int rowBegin, int rowEnd) const {
+    if (col < 0 || col >= static_cast<int>(columns.size()) || rows == 0) {
+        return {};
+    }
+    rowBegin = std::max(rowBegin, 0);
+    rowEnd = std::min(rowEnd, rows - 1);
+
+    const std::vector<ChunkRecord>* records =
+        HasChunkStats(col) ? &statsIndex.Records(col) : nullptr;
+    return ComputeStats(columns[col], records, rowBegin, rowEnd);
 }
 
 void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {

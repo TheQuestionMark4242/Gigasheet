@@ -28,10 +28,13 @@ add_executable(
     src/app.cpp
     src/ui/app.cpp
     src/ui/spreadsheet_frame.cpp
+    src/ui/statistics_dialog.cpp
     src/model/mmapped_table.cpp 
     src/storage/csv_importer.cpp
     src/storage/memory_usage.cpp
     src/stats/stats_writer.cpp
+    src/stats/stats_reader.cpp
+    src/stats/stats_query.cpp
 )
 
 target_include_directories(

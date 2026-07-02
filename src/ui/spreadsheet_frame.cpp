@@ -6,10 +6,13 @@
 #include <wx/stdpaths.h>
 
 #include "spreadsheet_frame.hpp"
+#include "statistics_dialog.hpp"
 #include "../storage/csv_importer.hpp"
 #include "../storage/memory_usage.hpp"
 #include "../model/mmapped_table.hpp"
 namespace {
+
+const int kStatisticsToolId = wxID_HIGHEST + 1;
 
 wxString FindCsvImporterPath() {
     wxFileName exeName(wxStandardPaths::Get().GetExecutablePath());
@@ -49,10 +52,12 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     wxToolBar* toolbar = CreateToolBar();
     toolbar->AddTool(wxID_OPEN, "Open CSV", wxArtProvider::GetBitmap(wxART_FILE_OPEN));
     toolbar->AddTool(wxID_ADD, "Add Column", wxArtProvider::GetBitmap(wxART_PLUS));
+    toolbar->AddTool(kStatisticsToolId, "Statistics", wxArtProvider::GetBitmap(wxART_REPORT_VIEW));
     toolbar->Realize();
 
     Bind(wxEVT_TOOL, &SpreadsheetFrame::OnOpenCsv, this, wxID_OPEN);
     Bind(wxEVT_TOOL, &SpreadsheetFrame::OnAddColumn, this, wxID_ADD);
+    Bind(wxEVT_TOOL, &SpreadsheetFrame::OnStatistics, this, kStatisticsToolId);
 
     // grid
     grid = new wxGrid(this, wxID_ANY);
@@ -124,6 +129,11 @@ void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
             wxICON_ERROR | wxOK,
             this);
     }
+}
+
+void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
+    StatisticsDialog dlg(this, table, grid->GetGridCursorCol());
+    dlg.ShowModal();
 }
 
 void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
