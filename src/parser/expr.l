@@ -38,6 +38,7 @@
 "/"                                     { return exprparse::Parser::make_SLASH(); }
 "("                                     { return exprparse::Parser::make_LPAREN(); }
 ")"                                     { return exprparse::Parser::make_RPAREN(); }
+","                                     { return exprparse::Parser::make_COMMA(); }
 
 .                                       { return exprparse::Parser::make_YYUNDEF(); }
 

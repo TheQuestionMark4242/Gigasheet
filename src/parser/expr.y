@@ -38,12 +38,14 @@
 %token <std::string> QIDENT "quoted column name"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/"
 %token LPAREN "(" RPAREN ")"
+%token COMMA ","
 
 %left "+" "-"
 %left "*" "/"
 %precedence UMINUS
 
 %type <exprparse::NodePtr> expr
+%type <std::vector<exprparse::NodePtr>> arglist
 
 %%
 
@@ -62,6 +64,13 @@ expr:
   | "-" expr %prec UMINUS { $$ = exprparse::MakeNode(exprparse::Unary{'-', std::move($2)}); }
   | "+" expr %prec UMINUS { $$ = std::move($2); }
   | "(" expr ")"        { $$ = std::move($2); }
+  | IDENT "(" ")"       { $$ = exprparse::MakeNode(exprparse::Call{std::move($1), {}}); }
+  | IDENT "(" arglist ")" { $$ = exprparse::MakeNode(exprparse::Call{std::move($1), std::move($3)}); }
+;
+
+arglist:
+    expr                { $$ = std::vector<exprparse::NodePtr>{}; $$.push_back(std::move($1)); }
+  | arglist "," expr    { $$ = std::move($1); $$.push_back(std::move($3)); }
 ;
 
 %%
