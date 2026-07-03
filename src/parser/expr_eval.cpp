@@ -333,6 +333,25 @@ TypedCompileResult CompileTyped(
     return result;
 }
 
+std::vector<std::string> FunctionNames() {
+    std::vector<std::string> names;
+    for (const auto& [name, fn] : UnaryFunctions()) names.push_back(name);
+    for (const auto& [name, fn] : BinaryFunctions()) names.push_back(name);
+    // Aggregates and string functions dispatched by name in the Call
+    // compiler ("avg" is an alias of AVERAGE, so it is not listed).
+    for (const char* s : {"sum", "average", "count",
+                          "concatenate", "left", "right", "mid", "len"}) {
+        names.emplace_back(s);
+    }
+    for (std::string& n : names) {
+        std::transform(n.begin(), n.end(), n.begin(),
+            [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    }
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
+}
+
 CompileResult CompileNumeric(const Node& root, const ColumnMap& columns) {
     TypedColumnMap typed;
     for (const auto& [name, fn] : columns) {

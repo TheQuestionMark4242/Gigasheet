@@ -1,28 +1,9 @@
 #include "statistics_dialog.hpp"
 
-#include <cctype>
 #include <chrono>
 #include <string>
 
 #include "../model/mmapped_table.hpp"
-
-namespace {
-
-// Column labels that aren't plain identifiers need "..." quoting to be
-// referenced in a formula.
-wxString FormulaForColumn(const wxString& label) {
-    const std::string s = label.ToStdString();
-    bool identifier = !s.empty() && !std::isdigit(static_cast<unsigned char>(s[0]));
-    for (const char ch : s) {
-        if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_') {
-            identifier = false;
-            break;
-        }
-    }
-    return identifier ? "=" + label : "=\"" + label + "\"";
-}
-
-} // namespace
 
 StatisticsDialog::StatisticsDialog(wxWindow* parent, MmappedTable* tablePtr, int initialCol)
     : wxDialog(parent, wxID_ANY, "Statistics",
@@ -34,21 +15,27 @@ StatisticsDialog::StatisticsDialog(wxWindow* parent, MmappedTable* tablePtr, int
 
     wxString initialFormula;
     if (initialCol >= 0 && initialCol < numCols) {
-        initialFormula = FormulaForColumn(table->GetColLabelValue(initialCol));
+        initialFormula = "=" + formulahint::FormulaName(table->GetColLabelValue(initialCol));
     } else if (numCols > 0) {
-        initialFormula = FormulaForColumn(table->GetColLabelValue(0));
+        initialFormula = "=" + formulahint::FormulaName(table->GetColLabelValue(0));
     }
 
     formulaCtrl = new wxTextCtrl(this, wxID_ANY, initialFormula,
         wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
     formulaCtrl->Bind(wxEVT_TEXT_ENTER, &StatisticsDialog::OnCompute, this);
 
+    wxArrayString labels;
+    for (int i = 0; i < numCols; ++i) {
+        labels.Add(table->GetColLabelValue(i));
+    }
+    autocomplete = std::make_unique<FormulaAutocomplete>(
+        formulaCtrl, formulahint::BuildFormulaCandidates(labels));
+
     auto* computeBtn = new wxButton(this, wxID_ANY, "Compute");
     computeBtn->Bind(wxEVT_BUTTON, &StatisticsDialog::OnCompute, this);
 
     auto* hint = new wxStaticText(this, wxID_ANY,
-        "Excel-style: =SUM(A1:A100), =AVERAGE(B:B), =MIN/MAX/COUNT(range), =SUM(A1:A50)/COUNT(A1:A50)\n"
-        "Or a per-row formula like =A*2 or =SQRT(A*A+B*B), computed over all rows.");
+        "e.g. =SUM(A1:A100) — type a letter for suggestions");
     resultText = new wxStaticText(this, wxID_ANY, "");
 
     auto* form = new wxFlexGridSizer(2, wxSize(8, 6));

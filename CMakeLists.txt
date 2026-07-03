@@ -44,6 +44,7 @@ add_executable(
     src/ui/app.cpp
     src/ui/spreadsheet_frame.cpp
     src/ui/statistics_dialog.cpp
+    src/ui/formula_autocomplete.cpp
     src/model/mmapped_table.cpp 
     src/storage/csv_importer.cpp
     src/storage/memory_usage.cpp

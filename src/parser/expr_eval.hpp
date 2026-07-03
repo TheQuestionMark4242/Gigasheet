@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "expr_ast.hpp"
 
@@ -60,5 +61,9 @@ TypedCompileResult CompileTyped(
 
 // Numeric-only convenience wrapper: string-typed results are a compile error.
 CompileResult CompileNumeric(const Node& root, const ColumnMap& columns);
+
+// Every callable function name, uppercase and sorted (for UI suggestions).
+// Derived from the dispatch tables so it cannot drift from the compiler.
+std::vector<std::string> FunctionNames();
 
 } // namespace exprparse

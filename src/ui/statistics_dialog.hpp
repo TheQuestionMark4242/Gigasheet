@@ -1,6 +1,10 @@
 #pragma once
 
+#include <memory>
+
 #include <wx/wx.h>
+
+#include "formula_autocomplete.hpp"
 
 class MmappedTable;
 
@@ -18,4 +22,5 @@ private:
     MmappedTable* table;
     wxTextCtrl* formulaCtrl = nullptr;
     wxStaticText* resultText = nullptr;
+    std::unique_ptr<FormulaAutocomplete> autocomplete;
 };

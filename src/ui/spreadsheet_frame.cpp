@@ -7,6 +7,7 @@
 
 #include "spreadsheet_frame.hpp"
 #include "statistics_dialog.hpp"
+#include "formula_autocomplete.hpp"
 #include "../storage/csv_importer.hpp"
 #include "../storage/memory_usage.hpp"
 #include "../model/mmapped_table.hpp"
@@ -183,15 +184,40 @@ void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
 }
 
 void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
-    wxTextEntryDialog dlg(this,
-        "Enter expression like =A + B*2, =SQRT(A*A+B*B) or =CONCATENATE(Name, ' - ', A)\n"
-        "Math: POW, LOG, LOG10, LOG2, EXP, SQRT, ABS, SIN, COS, TAN, FLOOR, CEIL, ROUND, MIN, MAX\n"
-        "Strings: CONCATENATE, LEFT(s,n), RIGHT(s,n), MID(s,start,len), LEN(s)\n"
-        "Aggregates (fixed at creation): =A - AVERAGE(A:A), =SUM(B1:B100)\n"
-        "Use \"...\" for column names with spaces and '...' for text literals.",
-        "Add Derived Column");
+    wxDialog dlg(this, wxID_ANY, "Add Derived Column",
+        wxDefaultPosition, wxDefaultSize,
+        wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+
+    auto* formulaCtrl = new wxTextCtrl(&dlg, wxID_ANY, "=",
+        wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+    auto* hint = new wxStaticText(&dlg, wxID_ANY,
+        "e.g. =A + B*2 or =CONCATENATE(Name, ' - ', A) — type a letter for suggestions");
+
+    wxArrayString labels;
+    for (int i = 0; i < table->GetNumberCols(); ++i) {
+        labels.Add(table->GetColLabelValue(i));
+    }
+    FormulaAutocomplete autocomplete(
+        formulaCtrl, formulahint::BuildFormulaCandidates(labels));
+    // Enter confirms the dialog once the suggestion popup is closed.
+    formulaCtrl->Bind(wxEVT_TEXT_ENTER,
+        [&dlg](wxCommandEvent&) { dlg.EndModal(wxID_OK); });
+
+    auto* top = new wxBoxSizer(wxVERTICAL);
+    top->Add(new wxStaticText(&dlg, wxID_ANY, "Expression:"), 0,
+        wxLEFT | wxRIGHT | wxTOP, 10);
+    top->Add(formulaCtrl, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
+    top->Add(hint, 0, wxEXPAND | wxALL, 10);
+    top->Add(dlg.CreateSeparatedButtonSizer(wxOK | wxCANCEL), 0,
+        wxEXPAND | wxALL, 6);
+    dlg.SetSizerAndFit(top);
+    dlg.SetMinSize(wxSize(480, dlg.GetMinSize().y));
+    dlg.SetSize(wxSize(480, -1));
+    formulaCtrl->SetFocus();
+    formulaCtrl->SetInsertionPointEnd();
+
     if (dlg.ShowModal() == wxID_OK) {
-        wxString expr = dlg.GetValue();
+        wxString expr = formulaCtrl->GetValue();
         table->AddDerivedColumn(expr, grid);
     }
 }
