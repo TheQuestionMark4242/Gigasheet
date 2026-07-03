@@ -4,8 +4,6 @@
 #include <chrono>
 #include <string>
 
-#include <wx/valnum.h>
-
 #include "../model/mmapped_table.hpp"
 
 namespace {
@@ -33,7 +31,6 @@ StatisticsDialog::StatisticsDialog(wxWindow* parent, MmappedTable* tablePtr, int
       table(tablePtr)
 {
     const int numCols = table->GetNumberCols();
-    const int numRows = table->GetNumberRows();
 
     wxString initialFormula;
     if (initialCol >= 0 && initialCol < numCols) {
@@ -46,32 +43,18 @@ StatisticsDialog::StatisticsDialog(wxWindow* parent, MmappedTable* tablePtr, int
         wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
     formulaCtrl->Bind(wxEVT_TEXT_ENTER, &StatisticsDialog::OnCompute, this);
 
-    // Rows are 1-based, like Excel (A1 = first row).
-    wxIntegerValidator<int> rowValidator;
-    rowValidator.SetRange(1, numRows > 0 ? numRows : 1);
-
-    rowBeginCtrl = new wxTextCtrl(this, wxID_ANY, "1",
-        wxDefaultPosition, wxDefaultSize, 0, rowValidator);
-    rowEndCtrl = new wxTextCtrl(this, wxID_ANY,
-        wxString::Format("%d", numRows > 0 ? numRows : 1),
-        wxDefaultPosition, wxDefaultSize, 0, rowValidator);
-
     auto* computeBtn = new wxButton(this, wxID_ANY, "Compute");
     computeBtn->Bind(wxEVT_BUTTON, &StatisticsDialog::OnCompute, this);
 
     auto* hint = new wxStaticText(this, wxID_ANY,
         "Excel-style: =SUM(A1:A100), =AVERAGE(B:B), =MIN/MAX/COUNT(range), =SUM(A1:A50)/COUNT(A1:A50)\n"
-        "Or a per-row formula like =A*2 or =SQRT(A*A+B*B), computed over the row range below.");
+        "Or a per-row formula like =A*2 or =SQRT(A*A+B*B), computed over all rows.");
     resultText = new wxStaticText(this, wxID_ANY, "");
 
     auto* form = new wxFlexGridSizer(2, wxSize(8, 6));
     form->AddGrowableCol(1);
     form->Add(new wxStaticText(this, wxID_ANY, "Formula:"), 0, wxALIGN_CENTER_VERTICAL);
     form->Add(formulaCtrl, 1, wxEXPAND);
-    form->Add(new wxStaticText(this, wxID_ANY, "First row:"), 0, wxALIGN_CENTER_VERTICAL);
-    form->Add(rowBeginCtrl, 1, wxEXPAND);
-    form->Add(new wxStaticText(this, wxID_ANY, "Last row:"), 0, wxALIGN_CENTER_VERTICAL);
-    form->Add(rowEndCtrl, 1, wxEXPAND);
 
     auto* top = new wxBoxSizer(wxVERTICAL);
     top->Add(form, 0, wxEXPAND | wxALL, 10);
@@ -90,27 +73,12 @@ void StatisticsDialog::OnCompute(wxCommandEvent&) {
         return;
     }
 
-    long rowBegin = 0, rowEnd = 0;
-    if (!rowBeginCtrl->GetValue().ToLong(&rowBegin) ||
-        !rowEndCtrl->GetValue().ToLong(&rowEnd) ||
-        rowBegin < 1 || rowEnd < 1)
-    {
-        resultText->SetLabel("Invalid row range.");
-        return;
-    }
-    if (rowEnd < rowBegin) {
-        resultText->SetLabel("Last row must be >= first row.");
-        return;
-    }
-    --rowBegin; // 1-based UI -> 0-based rows
-    --rowEnd;
-
     wxBusyCursor busy;
     std::string error;
     const auto start = std::chrono::steady_clock::now();
     const StatsResult r = table->ComputeFormulaStats(
         formula.ToStdString(),
-        static_cast<int>(rowBegin), static_cast<int>(rowEnd), error);
+        0, table->GetNumberRows() - 1, error);
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - start);
 

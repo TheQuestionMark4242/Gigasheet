@@ -5,8 +5,9 @@
 class MmappedTable;
 
 // Modal dialog computing SUM/AVG/MIN/MAX/COUNT over a formula (same syntax
-// as derived columns) and row range. A bare column reference is accelerated
-// by the per-chunk stats index; other formulas scan the range.
+// as derived columns). Row ranges are part of the formula, Excel-style:
+// =MAX(A1:A100). A bare column reference is accelerated by the per-chunk
+// stats index; per-row formulas scan all rows.
 class StatisticsDialog : public wxDialog {
 public:
     StatisticsDialog(wxWindow* parent, MmappedTable* table, int initialCol);
@@ -16,7 +17,5 @@ private:
 
     MmappedTable* table;
     wxTextCtrl* formulaCtrl = nullptr;
-    wxTextCtrl* rowBeginCtrl = nullptr;
-    wxTextCtrl* rowEndCtrl = nullptr;
     wxStaticText* resultText = nullptr;
 };
