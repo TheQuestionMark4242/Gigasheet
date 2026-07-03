@@ -19,6 +19,11 @@ struct StatsResult {
     std::uint64_t count = 0;
     bool usedIndex = false;   // true if precomputed chunk records were used
     bool valid = false;       // false for empty ranges / CHARBUF columns
+
+    // Excel-style aggregate expressions (=SUM(A1:A100)/COUNT(B:B)+1) yield a
+    // single number instead of per-row SUM/AVG/MIN/MAX/COUNT.
+    bool scalar = false;
+    double value = 0.0;
 };
 
 // Computes SUM/MIN/MAX/COUNT over rows [rowBegin, rowEnd] (inclusive) of a

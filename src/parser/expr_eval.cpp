@@ -60,8 +60,33 @@ std::string FormatNumber(double v) {
     return s;
 }
 
+// "A100" -> {"A", 100}; "A" -> {"A", -1} (no row, e.g. whole-column A:A).
+struct CellRef {
+    std::string name;
+    std::int64_t row = -1;   // 1-based, -1 if absent
+};
+
+CellRef SplitCellRef(const std::string& s) {
+    std::size_t i = s.size();
+    while (i > 0 && std::isdigit(static_cast<unsigned char>(s[i - 1]))) --i;
+    CellRef r;
+    if (i == 0 || i == s.size()) {
+        r.name = s;
+    } else {
+        r.name = s.substr(0, i);
+        r.row = std::stoll(s.substr(i));
+    }
+    return r;
+}
+
+bool IsAggregateName(const std::string& lower) {
+    return lower == "sum" || lower == "average" || lower == "avg" ||
+           lower == "min" || lower == "max" || lower == "count";
+}
+
 struct TypedCompiler {
     const TypedColumnMap& columns;
+    const Aggregator& aggregator;
     std::string error;
 
     using Result = std::optional<TypedFn>;
@@ -117,6 +142,43 @@ struct TypedCompiler {
         return it->second;
     }
 
+    Result operator()(const RangeRef& r) {
+        error = "A range like " + r.a + ":" + r.b
+            + " can only be used inside SUM/AVERAGE/MIN/MAX/COUNT.";
+        return {};
+    }
+
+    // SUM(A1:A100) and friends: resolved through the aggregator at compile
+    // time and folded into a constant.
+    Result CompileAggregate(const std::string& name, const RangeRef& range) {
+        if (!aggregator) {
+            error = name + "() with a range is not available here.";
+            return {};
+        }
+        const CellRef a = SplitCellRef(range.a);
+        const CellRef b = SplitCellRef(range.b);
+        if (a.name != b.name) {
+            error = "Range must stay in one column: " + range.a + ":" + range.b;
+            return {};
+        }
+
+        AggregateRequest req;
+        req.fn = (name == "avg") ? "average" : name;
+        req.column = a.name;
+        req.first = a.row > 0 ? a.row - 1 : 0;      // 1-based -> 0-based
+        req.last = b.row > 0 ? b.row - 1 : -1;      // -1: through the end
+        if (a.row > 0 && b.row > 0 && req.first > req.last) {
+            std::swap(req.first, req.last);          // A100:A1 == A1:A100
+        }
+
+        double out = 0.0;
+        if (!aggregator(req, out, error)) {
+            if (error.empty()) error = "Failed to compute " + name + "()";
+            return {};
+        }
+        return TypedFn{FnNum([out](int) { return out; })};
+    }
+
     Result operator()(const Unary& u) {
         auto rhs = Num(*u.operand, std::string("Unary '") + u.op + "'");
         if (!rhs) return {};
@@ -152,6 +214,21 @@ struct TypedCompiler {
 
     Result operator()(const Call& c) {
         const std::string name = ToLower(c.name);
+
+        // Aggregates take a single range argument; MIN/MAX without a range
+        // fall through to the two-argument math functions.
+        if (IsAggregateName(name)) {
+            if (c.args.size() == 1 &&
+                std::holds_alternative<RangeRef>(c.args[0]->value))
+            {
+                return CompileAggregate(name, std::get<RangeRef>(c.args[0]->value));
+            }
+            if (name != "min" && name != "max") {
+                error = name + "() expects a cell range, e.g. "
+                    + c.name + "(A1:A100) or " + c.name + "(A:A)";
+                return {};
+            }
+        }
 
         if (auto it = UnaryFunctions().find(name); it != UnaryFunctions().end()) {
             if (!CheckArity(c, name, 1)) return {};
@@ -243,8 +320,11 @@ struct TypedCompiler {
 
 } // namespace
 
-TypedCompileResult CompileTyped(const Node& root, const TypedColumnMap& columns) {
-    TypedCompiler compiler{columns, {}};
+TypedCompileResult CompileTyped(
+    const Node& root, const TypedColumnMap& columns,
+    const Aggregator& aggregator)
+{
+    TypedCompiler compiler{columns, aggregator, {}};
     TypedCompileResult result;
     result.fn = compiler(root);
     if (!result.fn) {

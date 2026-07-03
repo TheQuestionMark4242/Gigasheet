@@ -259,7 +259,9 @@ exprparse::TypedColumnMap MmappedTable::BuildColumnMap() const {
     exprparse::TypedColumnMap columnMap;
     for (size_t i = 0; i < columns.size(); ++i) {
         const Column& c = columns[i];
+        // Excel-style letter aliases, case-insensitive (A and a).
         const std::string alias = (i < 26) ? std::string(1, static_cast<char>('A' + static_cast<char>(i))) : std::string{};
+        const std::string aliasLower = (i < 26) ? std::string(1, static_cast<char>('a' + static_cast<char>(i))) : std::string{};
 
         auto registerColumn = [&](const std::string& key, exprparse::TypedFn fn) {
             if (!key.empty()) {
@@ -272,11 +274,13 @@ exprparse::TypedColumnMap MmappedTable::BuildColumnMap() const {
             exprparse::FnNum fn = [f](int row) -> double { return static_cast<double>(f(row)); };
             registerColumn(c.label, fn);
             registerColumn(alias, fn);
+            registerColumn(aliasLower, fn);
         } else if (c.type == ColumnType::DOUBLE) {
             auto f = std::get<FnDbl>(c.fn);
             exprparse::FnNum fn = [f](int row) -> double { return f(row); };
             registerColumn(c.label, fn);
             registerColumn(alias, fn);
+            registerColumn(aliasLower, fn);
         } else { // CHARBUF
             auto f = std::get<FnChar>(c.fn);
             exprparse::FnStr fn = [f](int row) -> std::string {
@@ -286,6 +290,7 @@ exprparse::TypedColumnMap MmappedTable::BuildColumnMap() const {
             };
             registerColumn(c.label, fn);
             registerColumn(alias, fn);
+            registerColumn(aliasLower, fn);
         }
     }
     return columnMap;
@@ -301,13 +306,59 @@ int MmappedTable::FindColumn(const std::string& name) const {
     if (found >= 0) {
         return found;
     }
-    if (name.size() == 1 && name[0] >= 'A' && name[0] <= 'Z') {
-        const int idx = name[0] - 'A';
+    if (name.size() == 1 &&
+        ((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z'))) {
+        const int idx = (name[0] >= 'a') ? name[0] - 'a' : name[0] - 'A';
         if (idx < static_cast<int>(columns.size())) {
             return idx;
         }
     }
     return -1;
+}
+
+exprparse::Aggregator MmappedTable::MakeAggregator(bool* usedIndexOut) const {
+    return [this, usedIndexOut](const exprparse::AggregateRequest& req,
+                                double& out, std::string& error) -> bool {
+        const int col = FindColumn(req.column);
+        if (col < 0) {
+            error = "Unknown column: " + req.column;
+            return false;
+        }
+        if (rows == 0) {
+            error = "The table is empty.";
+            return false;
+        }
+
+        const int first = static_cast<int>(std::max<std::int64_t>(req.first, 0));
+        const int last = req.last < 0
+            ? rows - 1
+            : static_cast<int>(std::min<std::int64_t>(req.last, rows - 1));
+        if (first > last) {
+            error = "Range is outside the table (" + std::to_string(rows) + " rows).";
+            return false;
+        }
+
+        const StatsResult r = ComputeColumnStats(col, first, last);
+        if (usedIndexOut && r.usedIndex) *usedIndexOut = true;
+
+        if (req.fn == "count") {
+            out = static_cast<double>(r.count);
+            return true;
+        }
+        if (!r.valid) {
+            error = req.column + " is a text column; only COUNT() applies.";
+            return false;
+        }
+        if (req.fn == "sum") out = r.sum;
+        else if (req.fn == "average") out = r.count > 0 ? r.sum / static_cast<double>(r.count) : 0.0;
+        else if (req.fn == "min") out = r.min;
+        else if (req.fn == "max") out = r.max;
+        else {
+            error = "Unknown aggregate: " + req.fn;
+            return false;
+        }
+        return true;
+    };
 }
 
 StatsResult MmappedTable::ComputeFormulaStats(
@@ -342,14 +393,34 @@ StatsResult MmappedTable::ComputeFormulaStats(
         // Unknown name falls through to CompileTyped for its error message.
     }
 
+    bool aggregateUsed = false;
+    bool aggregateIndexUsed = false;
+    const exprparse::Aggregator inner = MakeAggregator(&aggregateIndexUsed);
+    const exprparse::Aggregator aggregator =
+        [&](const exprparse::AggregateRequest& req, double& out, std::string& err) {
+            aggregateUsed = true;
+            return inner(req, out, err);
+        };
+
     exprparse::TypedCompileResult compiled =
-        exprparse::CompileTyped(*parsed.root, BuildColumnMap());
+        exprparse::CompileTyped(*parsed.root, BuildColumnMap(), aggregator);
     if (!compiled.fn) {
         errorOut = compiled.error;
         return {};
     }
 
     if (const auto* fn = std::get_if<exprparse::FnNum>(&*compiled.fn)) {
+        // Excel-style aggregate expression: the ranges are in the formula,
+        // so the result is a single number (aggregates fold to constants;
+        // any per-row terms are evaluated at the first row).
+        if (aggregateUsed) {
+            StatsResult r;
+            r.scalar = true;
+            r.valid = true;
+            r.value = (*fn)(rowBegin);
+            r.usedIndex = aggregateIndexUsed;
+            return r;
+        }
         return ScanFn(*fn, rowBegin, rowEnd);
     }
 
@@ -371,7 +442,9 @@ void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
         return;
     }
 
-    exprparse::TypedCompileResult compiled = exprparse::CompileTyped(*parsed.root, BuildColumnMap());
+    // Aggregates (=A - AVERAGE(A:A)) fold to constants at creation time.
+    exprparse::TypedCompileResult compiled = exprparse::CompileTyped(
+        *parsed.root, BuildColumnMap(), MakeAggregator(nullptr));
     if (!compiled.fn) {
         wxMessageBox("Error in expression: " + expr + "\n" + compiled.error,
                      "Expression Error", wxICON_ERROR);
@@ -502,5 +575,5 @@ wxString MmappedTable::GetColLabelValue(int col) {
 }
 
 wxString MmappedTable::GetRowLabelValue(int row) {
-    return wxString::Format("%d", row);
+    return wxString::Format("%d", row + 1); // 1-based, like Excel (A1 = first row)
 }

@@ -40,6 +40,7 @@
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/"
 %token LPAREN "(" RPAREN ")"
 %token COMMA ","
+%token COLON ":"
 
 %left "+" "-"
 %left "*" "/"
@@ -57,6 +58,7 @@ input:
 expr:
     NUMBER              { $$ = exprparse::MakeNode(exprparse::NumberLit{$1}); }
   | IDENT               { $$ = exprparse::MakeNode(exprparse::ColumnRef{std::move($1)}); }
+  | IDENT ":" IDENT     { $$ = exprparse::MakeNode(exprparse::RangeRef{std::move($1), std::move($3)}); }
   | QIDENT              { $$ = exprparse::MakeNode(exprparse::ColumnRef{std::move($1)}); }
   | STRING              { $$ = exprparse::MakeNode(exprparse::StringLit{std::move($1)}); }
   | expr "+" expr       { $$ = exprparse::MakeNode(exprparse::Binary{'+', std::move($1), std::move($3)}); }

@@ -184,9 +184,11 @@ void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
 
 void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
     wxTextEntryDialog dlg(this,
-        "Enter expression like =A + B*2, =sqrt(A*A+B*B) or =CONCATENATE(Name, ' - ', A)\n"
-        "Use \"...\" for column names with spaces and '...' for text literals.\n"
-        "String functions: CONCATENATE, LEFT(s,n), RIGHT(s,n), MID(s,start,len), LEN(s)",
+        "Enter expression like =A + B*2, =SQRT(A*A+B*B) or =CONCATENATE(Name, ' - ', A)\n"
+        "Math: POW, LOG, LOG10, LOG2, EXP, SQRT, ABS, SIN, COS, TAN, FLOOR, CEIL, ROUND, MIN, MAX\n"
+        "Strings: CONCATENATE, LEFT(s,n), RIGHT(s,n), MID(s,start,len), LEN(s)\n"
+        "Aggregates (fixed at creation): =A - AVERAGE(A:A), =SUM(B1:B100)\n"
+        "Use \"...\" for column names with spaces and '...' for text literals.",
         "Add Derived Column");
     if (dlg.ShowModal() == wxID_OK) {
         wxString expr = dlg.GetValue();

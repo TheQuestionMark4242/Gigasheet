@@ -30,11 +30,32 @@ struct TypedCompileResult {
     std::string error;           // set on error
 };
 
+// Excel-style aggregate over a cell range, e.g. SUM(A1:A100). Rows are
+// 0-based inclusive; last == -1 means "through the end of the column"
+// (from a whole-column range like A:A). fn is lowercase and normalized
+// ("sum", "average", "min", "max", "count").
+struct AggregateRequest {
+    std::string fn;
+    std::string column;
+    std::int64_t first = 0;
+    std::int64_t last = -1;
+};
+
+// Resolves an aggregate to its value (out) or fails with an error message.
+// Provided by the table, which owns the data and the chunk-stats index.
+using Aggregator = std::function<bool(
+    const AggregateRequest&, double& out, std::string& error)>;
+
 // Compiles the AST into a row function whose type (numeric or string) is
 // determined bottom-up. Unknown column references, type mismatches (e.g.
 // arithmetic on strings), unknown functions and wrong arities are compile
 // errors (typos should not silently evaluate to 0).
-TypedCompileResult CompileTyped(const Node& root, const TypedColumnMap& columns);
+// SUM/AVERAGE/MIN/MAX/COUNT over a range (=SUM(A1:A100)) are folded into
+// constants through the aggregator at compile time; without an aggregator
+// they are a compile error.
+TypedCompileResult CompileTyped(
+    const Node& root, const TypedColumnMap& columns,
+    const Aggregator& aggregator = {});
 
 // Numeric-only convenience wrapper: string-typed results are a compile error.
 CompileResult CompileNumeric(const Node& root, const ColumnMap& columns);

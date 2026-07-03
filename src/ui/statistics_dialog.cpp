@@ -46,20 +46,22 @@ StatisticsDialog::StatisticsDialog(wxWindow* parent, MmappedTable* tablePtr, int
         wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
     formulaCtrl->Bind(wxEVT_TEXT_ENTER, &StatisticsDialog::OnCompute, this);
 
+    // Rows are 1-based, like Excel (A1 = first row).
     wxIntegerValidator<int> rowValidator;
-    rowValidator.SetRange(0, numRows > 0 ? numRows - 1 : 0);
+    rowValidator.SetRange(1, numRows > 0 ? numRows : 1);
 
-    rowBeginCtrl = new wxTextCtrl(this, wxID_ANY, "0",
+    rowBeginCtrl = new wxTextCtrl(this, wxID_ANY, "1",
         wxDefaultPosition, wxDefaultSize, 0, rowValidator);
     rowEndCtrl = new wxTextCtrl(this, wxID_ANY,
-        wxString::Format("%d", numRows > 0 ? numRows - 1 : 0),
+        wxString::Format("%d", numRows > 0 ? numRows : 1),
         wxDefaultPosition, wxDefaultSize, 0, rowValidator);
 
     auto* computeBtn = new wxButton(this, wxID_ANY, "Compute");
     computeBtn->Bind(wxEVT_BUTTON, &StatisticsDialog::OnCompute, this);
 
     auto* hint = new wxStaticText(this, wxID_ANY,
-        "Formula like =A, =A*2 or =sqrt(A*A+B*B); \"...\" for column names with spaces.");
+        "Excel-style: =SUM(A1:A100), =AVERAGE(B:B), =MIN/MAX/COUNT(range), =SUM(A1:A50)/COUNT(A1:A50)\n"
+        "Or a per-row formula like =A*2 or =SQRT(A*A+B*B), computed over the row range below.");
     resultText = new wxStaticText(this, wxID_ANY, "");
 
     auto* form = new wxFlexGridSizer(2, wxSize(8, 6));
@@ -90,7 +92,8 @@ void StatisticsDialog::OnCompute(wxCommandEvent&) {
 
     long rowBegin = 0, rowEnd = 0;
     if (!rowBeginCtrl->GetValue().ToLong(&rowBegin) ||
-        !rowEndCtrl->GetValue().ToLong(&rowEnd))
+        !rowEndCtrl->GetValue().ToLong(&rowEnd) ||
+        rowBegin < 1 || rowEnd < 1)
     {
         resultText->SetLabel("Invalid row range.");
         return;
@@ -99,6 +102,8 @@ void StatisticsDialog::OnCompute(wxCommandEvent&) {
         resultText->SetLabel("Last row must be >= first row.");
         return;
     }
+    --rowBegin; // 1-based UI -> 0-based rows
+    --rowEnd;
 
     wxBusyCursor busy;
     std::string error;
@@ -116,7 +121,9 @@ void StatisticsDialog::OnCompute(wxCommandEvent&) {
     }
 
     wxString text;
-    if (!r.valid) {
+    if (r.scalar) {
+        text = wxString::Format("Result: %.6f", r.value);
+    } else if (!r.valid) {
         if (r.count == 0) {
             resultText->SetLabel("Empty range.");
             Layout();

@@ -73,6 +73,10 @@ private:
     // Matches BuildColumnMap precedence (a later registration wins).
     int FindColumn(const std::string& name) const;
 
+    // Resolves SUM/AVERAGE/MIN/MAX/COUNT over a cell range for the
+    // expression compiler. Sets *usedIndexOut when chunk records were used.
+    exprparse::Aggregator MakeAggregator(bool* usedIndexOut) const;
+
     // Chunk ids of the given base column that contain unsaved edits (their
     // precomputed stats records reflect the on-disk data, not the edits).
     std::unordered_set<std::int64_t> DirtyChunks(int col) const;
