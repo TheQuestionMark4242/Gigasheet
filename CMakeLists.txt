@@ -5,6 +5,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Boost REQUIRED)
+find_package(FLEX REQUIRED)
+find_package(BISON REQUIRED)
+
+BISON_TARGET(
+    ExprParser
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/parser/expr.y
+    ${CMAKE_CURRENT_BINARY_DIR}/expr_parser.cpp
+    DEFINES_FILE ${CMAKE_CURRENT_BINARY_DIR}/expr_parser.hpp
+)
+FLEX_TARGET(
+    ExprLexer
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/parser/expr.l
+    ${CMAKE_CURRENT_BINARY_DIR}/expr_lexer.cpp
+)
+ADD_FLEX_BISON_DEPENDENCY(ExprLexer ExprParser)
 
 find_program(WX_CONFIG_EXECUTABLE wx-config HINTS /mingw64/bin)
 if(WX_CONFIG_EXECUTABLE)
@@ -28,15 +43,25 @@ add_executable(
     src/app.cpp
     src/ui/app.cpp
     src/ui/spreadsheet_frame.cpp
+    src/ui/statistics_dialog.cpp
+    src/ui/formula_autocomplete.cpp
     src/model/mmapped_table.cpp 
     src/storage/csv_importer.cpp
     src/storage/memory_usage.cpp
+    src/stats/stats_writer.cpp
+    src/stats/stats_reader.cpp
+    src/stats/stats_query.cpp
+    src/parser/expr_eval.cpp
+    ${BISON_ExprParser_OUTPUTS}
+    ${FLEX_ExprLexer_OUTPUTS}
 )
 
 target_include_directories(
     spreadsheet
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third-party
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/parser
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_compile_options(

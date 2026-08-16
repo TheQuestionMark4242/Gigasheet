@@ -18,6 +18,8 @@ jobs:
           sudo apt install -y \
             build-essential \
             cmake \
+            flex \
+            bison \
             libwxgtk3.2-dev \
             libboost-all-dev
 
@@ -42,6 +44,8 @@ jobs:
           update: true
           install: >
             make
+            flex
+            bison
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-wxwidgets3.2-msw
