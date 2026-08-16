@@ -110,16 +110,17 @@ jobs:
           # Re-resolve the exe from inside release/. Any dependency still
           # pointing into the MSYS2 tree (rather than a DLL we shipped or a
           # Windows system DLL) would be missing on a user's machine -> fail.
+          # Write the report OUTSIDE release/ so it isn't swept into the zip.
           cd release
           ntldd -R gigasheet.exe \
             | awk '{for (i=1;i<=NF;i++) if ($i=="=>") print $(i+1)}' \
             | grep -iE 'mingw64|/mingw|msys64' \
             | grep -viE '[/\\\\]release[/\\\\]' \
-            | sort -u > outside.txt || true
+            | sort -u > ../outside.txt || true
 
-          if [ -s outside.txt ]; then
+          if [ -s ../outside.txt ]; then
             echo "::error::These DLLs resolve outside the bundle and would be missing on a clean machine:"
-            cat outside.txt
+            cat ../outside.txt
             exit 1
           fi
           echo "OK: exe resolves only bundled DLLs + Windows system DLLs."
