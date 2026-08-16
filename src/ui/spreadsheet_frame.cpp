@@ -732,6 +732,14 @@ void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
         auto* frame = new SpreadsheetFrame(outputDir);
         frame->Show(true);
         frame->Raise();
+
+        // If this window had no file open (an empty launcher window), replace
+        // it with the newly loaded one instead of leaving an empty window
+        // behind. A window that already has a file loaded is kept, so opening
+        // another file gives you a second window.
+        if (datasetDir.IsEmpty()) {
+            Close();
+        }
     }
     catch (const std::exception& ex) {
         wxMessageBox(
