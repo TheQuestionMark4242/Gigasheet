@@ -238,7 +238,8 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     actions->Add(navButton("Save",       [this]{ wxCommandEvent e; OnSave(e); }),       0, wxRIGHT, 4);
     actions->Add(navButton("Add Column", [this]{ wxCommandEvent e; OnAddColumn(e); }),  0, wxRIGHT, 4);
     actions->Add(navButton("Statistics", [this]{ wxCommandEvent e; OnStatistics(e); }), 0, wxRIGHT, 4);
-    actions->Add(navButton("Filter",     [this]{ wxCommandEvent e; OnFilter(e); }),     0, wxRIGHT, 4);
+    filterButton = navButton("Enable Filtering", [this]{ OnToggleFiltering(); });
+    actions->Add(filterButton, 0, wxRIGHT, 4);
     actions->Add(navButton("Appearance", [this]{ OnAppearance(); }), 0, wxRIGHT, 4);
     topSizer->Add(actions, 0, wxLEFT | wxTOP, 8);
 
@@ -265,6 +266,13 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     StyleGrid();
 
     grid->Bind(wxEVT_GRID_SELECT_CELL, &SpreadsheetFrame::OnGridSelectCell, this);
+    grid->Bind(wxEVT_GRID_LABEL_LEFT_CLICK, &SpreadsheetFrame::OnColumnLabelClick, this);
+    // Inline cell edits: re-evaluate active filters against the new value so
+    // the row drops out / stays as appropriate, then repaint.
+    grid->Bind(wxEVT_GRID_CELL_CHANGED, [this](wxGridEvent& e) {
+        RecomputeFiltersAfterEdit(e.GetCol());
+        e.Skip();
+    });
     formulaBar->Bind(wxEVT_TEXT_ENTER, &SpreadsheetFrame::OnFormulaEnter, this);
 
     UpdateStatus();
@@ -453,6 +461,7 @@ void SpreadsheetFrame::OnFormulaEnter(wxCommandEvent&) {
     if (row >= 0 && col >= 0) {
         grid->SetCellValue(row, col, formulaBar->GetValue());
         grid->ForceRefresh();
+        RecomputeFiltersAfterEdit(col);
         UpdateStatus();
     }
     grid->SetFocus();
@@ -573,107 +582,161 @@ void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
     dlg.ShowModal();
 }
 
-void SpreadsheetFrame::OnFilter(wxCommandEvent&) {
-    const int numCols = table->GetNumberCols();
-    if (numCols == 0) return;
+void SpreadsheetFrame::OnToggleFiltering() {
+    const bool enable = !table->FilteringEnabled();
+    table->SetFilteringEnabled(enable);
 
-    wxDialog dlg(this, wxID_ANY, "Filter Rows",
-        wxDefaultPosition, wxDefaultSize,
-        wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+    if (!enable) {
+        // Leaving filter mode: drop all predicates and show the full table.
+        wxBusyCursor busy;
+        table->ClearFilters(grid);
+    }
 
-    // Column picker.
-    wxArrayString colNames;
-    for (int i = 0; i < numCols; ++i) colNames.Add(table->GetColLabelValue(i));
-    auto* colChoice = new wxChoice(&dlg, wxID_ANY, wxDefaultPosition,
-                                   wxDefaultSize, colNames);
-    colChoice->SetSelection(std::max(0, grid->GetGridCursorCol()));
+    if (filterButton) {
+        filterButton->SetLabel(
+            enable ? "  Disable Filtering  " : "  Enable Filtering  ");
+        topBar->Layout();
+    }
 
-    // Text-match kind (used only for CHARBUF columns).
-    wxArrayString matchKinds;
-    matchKinds.Add("contains");
-    matchKinds.Add("equals");
-    auto* matchChoice = new wxChoice(&dlg, wxID_ANY, wxDefaultPosition,
-                                     wxDefaultSize, matchKinds);
-    matchChoice->SetSelection(0);
+    RefreshFilterMarkers();
+    UpdateStatus();
+    grid->ForceRefresh();
 
-    // Numeric range inputs and a single text value input; only the relevant
-    // controls are shown for the selected column's type.
-    auto* loCtrl   = new wxTextCtrl(&dlg, wxID_ANY);
-    auto* hiCtrl   = new wxTextCtrl(&dlg, wxID_ANY);
-    auto* textCtrl = new wxTextCtrl(&dlg, wxID_ANY);
+    if (enable) {
+        SetStatusText("Filtering on: click a column header to filter it.");
+    }
+}
 
-    auto* loLabel   = new wxStaticText(&dlg, wxID_ANY, "Min:");
-    auto* hiLabel   = new wxStaticText(&dlg, wxID_ANY, "Max:");
-    auto* textLabel = new wxStaticText(&dlg, wxID_ANY, "Value:");
-    auto* matchLabel= new wxStaticText(&dlg, wxID_ANY, "Match:");
+void SpreadsheetFrame::RefreshFilterMarkers() {
+    // Column labels are pulled from the table (which appends the ▼/▽ marker) on
+    // each paint, so repainting the header window is enough to show/hide them.
+    if (!grid) return;
+    grid->GetGridColLabelWindow()->Refresh();
+}
 
-    auto* activeLabel = new wxStaticText(&dlg, wxID_ANY, wxEmptyString);
+void SpreadsheetFrame::OnColumnLabelClick(wxGridEvent& event) {
+    if (!table->FilteringEnabled()) { event.Skip(); return; }
+    const int col = event.GetCol();
+    if (col < 0) { event.Skip(); return; } // row-label corner / row labels
+    ShowColumnFilterPopup(col);
+    // handled: don't let the grid start a column selection/sort
+}
 
-    auto isTextCol = [this](int col) {
-        return table->GetColumn(col).type == ColumnType::CHARBUF;
-    };
-    auto refreshActive = [&] {
-        const auto& fs = table->ActiveFilters();
-        if (fs.empty()) {
-            activeLabel->SetLabel("No active filters.");
-        } else {
-            activeLabel->SetLabel(
-                wxString::Format("%zu active filter(s) (combined with AND).",
-                                 fs.size()));
-        }
-    };
+void SpreadsheetFrame::RecomputeFiltersAfterEdit(int col) {
+    if (!table->IsFiltered()) return;
+    wxBusyCursor busy;
+    table->RecomputeFiltersAfterEdit(col, grid);
+    UpdateStatus();
+}
 
-    // Show/hide inputs to match the selected column's type.
-    auto syncInputs = [&] {
-        const bool text = isTextCol(colChoice->GetSelection());
-        loLabel->Show(!text);   loCtrl->Show(!text);
-        hiLabel->Show(!text);   hiCtrl->Show(!text);
-        matchLabel->Show(text); matchChoice->Show(text);
-        textLabel->Show(text);  textCtrl->Show(text);
-        dlg.Layout();
-    };
-    colChoice->Bind(wxEVT_CHOICE, [&](wxCommandEvent&) { syncInputs(); });
+// A small dropdown-style dialog to set one column's predicate. Numeric columns
+// get a Min/Max range; text columns get a contains/equals match. The dialog is
+// positioned just under the clicked column header so it reads like a dropdown.
+void SpreadsheetFrame::ShowColumnFilterPopup(int col) {
+    const bool isText = table->GetColumn(col).type == ColumnType::CHARBUF;
+    const ColumnFilter* existing = table->ColumnFilterFor(col);
+
+    wxDialog dlg(this, wxID_ANY,
+                 "Filter: " + table->GetColumn(col).label,
+                 wxDefaultPosition, wxDefaultSize,
+                 wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER);
 
     auto* form = new wxFlexGridSizer(2, wxSize(8, 6));
     form->AddGrowableCol(1);
-    form->Add(new wxStaticText(&dlg, wxID_ANY, "Column:"), 0, wxALIGN_CENTER_VERTICAL);
-    form->Add(colChoice, 1, wxEXPAND);
-    form->Add(loLabel, 0, wxALIGN_CENTER_VERTICAL);   form->Add(loCtrl, 1, wxEXPAND);
-    form->Add(hiLabel, 0, wxALIGN_CENTER_VERTICAL);   form->Add(hiCtrl, 1, wxEXPAND);
-    form->Add(matchLabel, 0, wxALIGN_CENTER_VERTICAL);form->Add(matchChoice, 1, wxEXPAND);
-    form->Add(textLabel, 0, wxALIGN_CENTER_VERTICAL); form->Add(textCtrl, 1, wxEXPAND);
 
-    // Custom buttons: Add filter, Clear all, Close.
-    auto* addBtn   = new wxButton(&dlg, wxID_ANY, "Add Filter");
-    auto* clearBtn = new wxButton(&dlg, wxID_ANY, "Clear All");
-    auto* closeBtn = new wxButton(&dlg, wxID_CANCEL, "Close");
+    wxTextCtrl* loCtrl = nullptr;
+    wxTextCtrl* hiCtrl = nullptr;
+    wxTextCtrl* textCtrl = nullptr;
+    wxChoice*   matchChoice = nullptr;
+
+    if (isText) {
+        wxArrayString kinds;
+        kinds.Add("contains");
+        kinds.Add("equals");
+        matchChoice = new wxChoice(&dlg, wxID_ANY, wxDefaultPosition,
+                                   wxDefaultSize, kinds);
+        matchChoice->SetSelection(
+            existing && existing->kind == ColumnFilter::Kind::Equals ? 1 : 0);
+        textCtrl = new wxTextCtrl(&dlg, wxID_ANY,
+            existing ? wxString::FromUTF8(existing->text) : wxString(),
+            wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+
+        form->Add(new wxStaticText(&dlg, wxID_ANY, "Match:"), 0, wxALIGN_CENTER_VERTICAL);
+        form->Add(matchChoice, 1, wxEXPAND);
+        form->Add(new wxStaticText(&dlg, wxID_ANY, "Value:"), 0, wxALIGN_CENTER_VERTICAL);
+        form->Add(textCtrl, 1, wxEXPAND);
+    } else {
+        auto fmt = [](double v) -> wxString {
+            if (v == -std::numeric_limits<double>::infinity() ||
+                v ==  std::numeric_limits<double>::infinity()) return wxString();
+            return wxString::Format("%g", v);
+        };
+        loCtrl = new wxTextCtrl(&dlg, wxID_ANY,
+            existing ? fmt(existing->lo) : wxString(),
+            wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+        hiCtrl = new wxTextCtrl(&dlg, wxID_ANY,
+            existing ? fmt(existing->hi) : wxString(),
+            wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+
+        form->Add(new wxStaticText(&dlg, wxID_ANY, "Min:"), 0, wxALIGN_CENTER_VERTICAL);
+        form->Add(loCtrl, 1, wxEXPAND);
+        form->Add(new wxStaticText(&dlg, wxID_ANY, "Max:"), 0, wxALIGN_CENTER_VERTICAL);
+        form->Add(hiCtrl, 1, wxEXPAND);
+    }
+
+    auto* applyBtn  = new wxButton(&dlg, wxID_OK, "Apply");
+    auto* removeBtn = new wxButton(&dlg, wxID_ANY, "Remove");
+    auto* clearBtn  = new wxButton(&dlg, wxID_ANY, "Clear All");
+    auto* cancelBtn = new wxButton(&dlg, wxID_CANCEL, "Cancel");
+    removeBtn->Enable(existing != nullptr);
+    clearBtn->Enable(table->ActiveFilterCount() > 0);
+
     auto* btns = new wxBoxSizer(wxHORIZONTAL);
-    btns->Add(addBtn, 0, wxRIGHT, 6);
+    btns->Add(applyBtn, 0, wxRIGHT, 6);
+    btns->Add(removeBtn, 0, wxRIGHT, 6);
     btns->Add(clearBtn, 0, wxRIGHT, 6);
     btns->AddStretchSpacer();
-    btns->Add(closeBtn, 0);
+    btns->Add(cancelBtn, 0);
 
     auto* top = new wxBoxSizer(wxVERTICAL);
     top->Add(new wxStaticText(&dlg, wxID_ANY,
-        "Add one or more filters. Rows must match every filter (AND)."),
+        isText ? "Show rows where this column matches:"
+               : "Show rows where this column is in range\n(leave a box empty for no bound):"),
         0, wxALL, 10);
     top->Add(form, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
-    top->Add(activeLabel, 0, wxALL, 10);
     top->Add(btns, 0, wxEXPAND | wxALL, 10);
     dlg.SetSizerAndFit(top);
-    dlg.SetMinSize(wxSize(420, dlg.GetMinSize().y));
-    dlg.SetSize(wxSize(420, -1));
+    dlg.SetMinSize(wxSize(320, dlg.GetMinSize().y));
 
-    refreshActive();
-    syncInputs();
+    // Position the dialog just below the clicked column header, like a dropdown.
+    {
+        int colLeft = 0; // logical x of the column within the grid content
+        for (int c = 0; c < col; ++c) colLeft += grid->GetColSize(c);
+        const int scrolledX = grid->CalcScrolledPosition(
+            wxPoint(colLeft, 0)).x;
+        const wxPoint anchor = grid->GetGridColLabelWindow()->ClientToScreen(
+            wxPoint(scrolledX, grid->GetColLabelSize()));
+        dlg.Move(anchor);
+    }
 
-    addBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
-        const int col = colChoice->GetSelection();
-        if (col < 0) return;
+    removeBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) { dlg.EndModal(wxID_REMOVE); });
+    clearBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) { dlg.EndModal(wxID_CLEAR); });
+    if (textCtrl) textCtrl->Bind(wxEVT_TEXT_ENTER, [&](wxCommandEvent&) { dlg.EndModal(wxID_OK); });
+    if (loCtrl)   loCtrl->Bind(wxEVT_TEXT_ENTER,   [&](wxCommandEvent&) { dlg.EndModal(wxID_OK); });
+    if (hiCtrl)   hiCtrl->Bind(wxEVT_TEXT_ENTER,   [&](wxCommandEvent&) { dlg.EndModal(wxID_OK); });
 
+    const int rc = dlg.ShowModal();
+
+    if (rc == wxID_CLEAR) {
+        wxBusyCursor busy;
+        table->ClearFilters(grid);
+    } else if (rc == wxID_REMOVE) {
+        wxBusyCursor busy;
+        table->ClearColumnFilter(col, grid);
+    } else if (rc == wxID_OK) {
         ColumnFilter f;
         f.col = col;
-        if (isTextCol(col)) {
+        if (isText) {
             f.kind = matchChoice->GetSelection() == 1
                          ? ColumnFilter::Kind::Equals
                          : ColumnFilter::Kind::Contains;
@@ -681,42 +744,30 @@ void SpreadsheetFrame::OnFilter(wxCommandEvent&) {
         } else {
             const wxString loS = loCtrl->GetValue().Strip(wxString::both);
             const wxString hiS = hiCtrl->GetValue().Strip(wxString::both);
-            // An empty bound is unbounded on that side.
             double lo = -std::numeric_limits<double>::infinity();
             double hi =  std::numeric_limits<double>::infinity();
             if (!loS.IsEmpty() && !loS.ToDouble(&lo)) {
                 wxMessageBox("Min is not a valid number.", "Invalid filter",
-                             wxICON_ERROR, &dlg);
+                             wxICON_ERROR, this);
                 return;
             }
             if (!hiS.IsEmpty() && !hiS.ToDouble(&hi)) {
                 wxMessageBox("Max is not a valid number.", "Invalid filter",
-                             wxICON_ERROR, &dlg);
+                             wxICON_ERROR, this);
                 return;
             }
             f.kind = ColumnFilter::Kind::Range;
             f.lo = lo;
             f.hi = hi;
         }
-
-        std::vector<ColumnFilter> filters = table->ActiveFilters();
-        filters.push_back(f);
-        {
-            wxBusyCursor busy;
-            table->SetFilters(filters, grid);
-        }
-        refreshActive();
-        UpdateStatus();
-    });
-
-    clearBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
         wxBusyCursor busy;
-        table->ClearFilters(grid);
-        refreshActive();
-        UpdateStatus();
-    });
+        table->SetColumnFilter(f, grid);
+    } else {
+        return; // cancelled
+    }
 
-    dlg.ShowModal();
+    RefreshFilterMarkers();
+    UpdateStatus();
 }
 
 void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {

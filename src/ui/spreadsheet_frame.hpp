@@ -17,11 +17,22 @@ private:
     void OnSave(wxCommandEvent&);
     void OnAddColumn(wxCommandEvent&);
     void OnStatistics(wxCommandEvent&);
-    void OnFilter(wxCommandEvent&);
     void OnClose(wxCloseEvent&);
     void OnTimer(wxTimerEvent&);
     void OnGridSelectCell(wxGridEvent&);
     void OnFormulaEnter(wxCommandEvent&);
+
+    // Toggle filtering mode: shows/hides the per-column filter affordance on
+    // the column headers and clears active filters when turned off.
+    void OnToggleFiltering();
+    // Open the filter dropdown for a single column (numeric range or text
+    // match), with Apply / Remove buttons.
+    void OnColumnLabelClick(wxGridEvent&);
+    void ShowColumnFilterPopup(int col);
+    // Refresh the "▼" filter markers on the column labels.
+    void RefreshFilterMarkers();
+    // Recompute filters after a cell edit, then repaint (no-op if unfiltered).
+    void RecomputeFiltersAfterEdit(int col);
     void UpdateStatus();
     bool DoSave();
 
@@ -50,6 +61,8 @@ private:
     // Chrome widgets kept for live re-theming.
     wxPanel* topBar = nullptr;
     std::vector<wxStaticText*> navButtons;
+    // The Enable/Disable Filtering nav button (label toggles).
+    wxStaticText* filterButton = nullptr;
 
     // Formula bar (above the grid): cell address + editable value field.
     wxStaticText* cellRefLabel = nullptr;

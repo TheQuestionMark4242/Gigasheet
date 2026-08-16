@@ -183,23 +183,20 @@ void MmappedTable::EvalFilter(const ColumnFilter& f, std::vector<uint64_t>& out)
     }
 }
 
-void MmappedTable::SetFilters(const std::vector<ColumnFilter>& filters, wxGrid* gridPtr) {
-    const int oldVisible = VisibleRows();
-
-    activeFilters = filters;
-
-    if (activeFilters.empty() || rows == 0) {
+// Intersect all cached bitvectors into the visible filteredRows list, then
+// (optionally) notify the grid of the row-count delta.
+void MmappedTable::RebuildFilteredView(int oldVisible, wxGrid* gridPtr) {
+    if (columnFilters.empty() || rows == 0) {
         filteredRows.clear();
         filterActive = false;
     } else {
         const size_t words = (static_cast<size_t>(rows) + 63) / 64;
-        std::vector<uint64_t> acc(words, ~0ull), tmp(words);
+        std::vector<uint64_t> acc(words, ~0ull);
         // Mask off the padding bits in the last word so they never survive AND.
         if (const int rem = rows & 63) acc.back() = (1ull << rem) - 1;
 
-        for (const ColumnFilter& f : activeFilters) {
-            EvalFilter(f, tmp);
-            for (size_t w = 0; w < words; ++w) acc[w] &= tmp[w];
+        for (const auto& [col, bits] : filterBits) {
+            for (size_t w = 0; w < words; ++w) acc[w] &= bits[w];
         }
 
         filteredRows.clear();
@@ -209,8 +206,8 @@ void MmappedTable::SetFilters(const std::vector<ColumnFilter>& filters, wxGrid* 
         filterActive = true;
     }
 
-    // Refresh the grid: reconcile the row-count change so wxGrid reallocates
-    // its row geometry, then repaint.
+    // Reconcile the row-count change so wxGrid reallocates row geometry, then
+    // repaint.
     if (gridPtr) {
         const int newVisible = VisibleRows();
         if (newVisible < oldVisible) {
@@ -226,8 +223,56 @@ void MmappedTable::SetFilters(const std::vector<ColumnFilter>& filters, wxGrid* 
     }
 }
 
+void MmappedTable::SetColumnFilter(const ColumnFilter& f, wxGrid* gridPtr) {
+    if (f.col < 0 || f.col >= static_cast<int>(columns.size())) return;
+    const int oldVisible = VisibleRows();
+
+    const size_t words = (static_cast<size_t>(rows) + 63) / 64;
+    std::vector<uint64_t> bits(words);
+    EvalFilter(f, bits);
+
+    columnFilters[f.col] = f;
+    filterBits[f.col] = std::move(bits);
+
+    RebuildFilteredView(oldVisible, gridPtr);
+}
+
+void MmappedTable::ClearColumnFilter(int col, wxGrid* gridPtr) {
+    if (columnFilters.erase(col) == 0) return;
+    filterBits.erase(col);
+    const int oldVisible = VisibleRows();
+    RebuildFilteredView(oldVisible, gridPtr);
+}
+
 void MmappedTable::ClearFilters(wxGrid* gridPtr) {
-    SetFilters({}, gridPtr);
+    if (columnFilters.empty()) return;
+    const int oldVisible = VisibleRows();
+    columnFilters.clear();
+    filterBits.clear();
+    RebuildFilteredView(oldVisible, gridPtr);
+}
+
+void MmappedTable::RecomputeFiltersAfterEdit(int col, wxGrid* gridPtr) {
+    if (columnFilters.empty()) return;
+
+    const int oldVisible = VisibleRows();
+    const size_t words = (static_cast<size_t>(rows) + 63) / 64;
+
+    // Re-evaluate the edited column's own predicate (if any). Derived columns
+    // may read the edited base column, so any predicate on a derived column is
+    // re-evaluated too; base-column predicates on other columns are unaffected
+    // by an edit and keep their cached bitvector.
+    for (auto& [fcol, f] : columnFilters) {
+        const bool isEditedCol = (fcol == col);
+        const bool isDerived = (fcol >= numBaseCols);
+        if (isEditedCol || isDerived) {
+            std::vector<uint64_t>& bits = filterBits[fcol];
+            if (bits.size() != words) bits.assign(words, 0);
+            EvalFilter(f, bits);
+        }
+    }
+
+    RebuildFilteredView(oldVisible, gridPtr);
 }
 
 bool MmappedTable::SaveOverrides(std::string& errorOut) {
@@ -697,7 +742,15 @@ void MmappedTable::SetValue(int row, int col, const wxString& value) {
 
 wxString MmappedTable::GetColLabelValue(int col) {
     if (col < 0 || col >= static_cast<int>(columns.size())) return "";
-    return columns[col].label;
+    wxString label = columns[col].label;
+    if (filteringEnabled) {
+        // A filled marker for a column with an active predicate, an outline one
+        // for a column you can click to add a filter.
+        label += HasColumnFilter(col)
+                     ? wxString::FromUTF8(" \xE2\x96\xBC")   // " ▼"
+                     : wxString::FromUTF8(" \xE2\x96\xBD");  // " ▽"
+    }
+    return label;
 }
 
 wxString MmappedTable::GetRowLabelValue(int row) {

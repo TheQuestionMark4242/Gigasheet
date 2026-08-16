@@ -60,15 +60,39 @@ public:
     const Column& GetColumn(int col) const { return columns[col]; }
 
     // -------- Filtering (bitvector full-scan predicate evaluation) --------
-    // Replace the active filter set and rebuild the filtered-row view by
-    // scanning the mmapped columns into per-predicate bitvectors and AND-ing
-    // them. gridPtr (if given) is notified so the view refreshes. Passing an
-    // empty list clears filtering (the full table is shown again).
-    void SetFilters(const std::vector<ColumnFilter>& filters, wxGrid* gridPtr);
+    // At most one predicate is active per column. Each predicate is evaluated
+    // once into a cached bitvector (one bit per row); the visible view is the
+    // AND of all cached bitvectors. Caching lets a cell edit recompute only the
+    // affected column's bitvector instead of rescanning everything.
+
+    // Set (or replace) the predicate on f.col and refresh the view. gridPtr, if
+    // given, is notified so wxGrid reflows its rows.
+    void SetColumnFilter(const ColumnFilter& f, wxGrid* gridPtr);
+
+    // Remove the predicate on a column (no-op if none) and refresh the view.
+    void ClearColumnFilter(int col, wxGrid* gridPtr);
+
+    // Remove every predicate and show the full table again.
     void ClearFilters(wxGrid* gridPtr);
 
+    // Re-evaluate the bitvector(s) affected by an edit at (underlyingRow, col),
+    // re-intersect, and refresh the view. Cheap: only the edited column (and any
+    // derived columns, which may depend on it) are rescanned.
+    void RecomputeFiltersAfterEdit(int col, wxGrid* gridPtr);
+
+    // Filtering mode (UI): when on, column labels carry a clickable filter
+    // marker. This does not itself change which rows are visible.
+    void SetFilteringEnabled(bool on) { filteringEnabled = on; }
+    bool FilteringEnabled() const { return filteringEnabled; }
+
     bool IsFiltered() const { return filterActive; }
-    const std::vector<ColumnFilter>& ActiveFilters() const { return activeFilters; }
+    bool HasColumnFilter(int col) const { return columnFilters.count(col) != 0; }
+    // The active predicate on a column; nullptr if none.
+    const ColumnFilter* ColumnFilterFor(int col) const {
+        auto it = columnFilters.find(col);
+        return it == columnFilters.end() ? nullptr : &it->second;
+    }
+    std::size_t ActiveFilterCount() const { return columnFilters.size(); }
 
     // Rows currently visible: the filtered count when a filter is active,
     // otherwise the full table. TotalRows() is always the underlying count.
@@ -140,7 +164,17 @@ private:
     // Evaluate one predicate over every row into `out` (one bit per row).
     void EvalFilter(const ColumnFilter& f, std::vector<uint64_t>& out) const;
 
-    std::vector<ColumnFilter> activeFilters;   // AND-combined predicates
+    // AND every cached bitvector, rebuild filteredRows, and (optionally) notify
+    // the grid of the row-count change. oldVisible is the row count before the
+    // change so the delta message is correct.
+    void RebuildFilteredView(int oldVisible, wxGrid* gridPtr);
+
+    // Column index -> active predicate on that column.
+    std::unordered_map<int, ColumnFilter> columnFilters;
+    // Column index -> that predicate's cached bitvector (one bit per row).
+    std::unordered_map<int, std::vector<uint64_t>> filterBits;
+
     std::vector<int> filteredRows;             // view row -> underlying row
     bool filterActive = false;
+    bool filteringEnabled = false;             // UI filter-mode toggle
 };
