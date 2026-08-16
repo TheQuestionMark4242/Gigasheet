@@ -130,6 +130,106 @@ MmappedTable::MmappedTable(const std::string& dirPath) {
         fs::path(dirPath), numCols, static_cast<std::uint64_t>(rows));
 }
 
+// Evaluate a single predicate over every row, setting the bit for each match.
+// Mirrors the full-scan bitvector technique from bench/scan_bench.cpp: one bit
+// per row, no early exit, values read through the column fn so unsaved edits
+// and derived columns are honoured.
+void MmappedTable::EvalFilter(const ColumnFilter& f, std::vector<uint64_t>& out) const {
+    std::fill(out.begin(), out.end(), 0);
+    if (f.col < 0 || f.col >= static_cast<int>(columns.size()) || rows == 0) return;
+
+    const Column& c = columns[f.col];
+    auto setBit = [&out](int i) { out[i >> 6] |= (1ull << (i & 63)); };
+
+    if (f.kind == ColumnFilter::Kind::Range) {
+        if (c.type == ColumnType::INT32) {
+            const auto& fn = std::get<FnInt>(c.fn);
+            for (int i = 0; i < rows; ++i) {
+                const double v = static_cast<double>(fn(i));
+                if (v >= f.lo && v <= f.hi) setBit(i);
+            }
+        } else if (c.type == ColumnType::DOUBLE) {
+            const auto& fn = std::get<FnDbl>(c.fn);
+            for (int i = 0; i < rows; ++i) {
+                const double v = fn(i);
+                if (v >= f.lo && v <= f.hi) setBit(i);
+            }
+        }
+        // Range on a text column matches nothing.
+        return;
+    }
+
+    // Equals / Contains: only meaningful for text columns.
+    if (c.type != ColumnType::CHARBUF) return;
+    const auto& fn = std::get<FnChar>(c.fn);
+    const std::string& target = f.text;
+
+    if (f.kind == ColumnFilter::Kind::Equals) {
+        for (int i = 0; i < rows; ++i) {
+            char_buf b = fn(i);
+            b[63] = '\0';
+            if (target == b.data()) setBit(i);
+        }
+    } else { // Contains (substring)
+        if (target.empty()) { // empty substring matches every row
+            for (int i = 0; i < rows; ++i) setBit(i);
+            return;
+        }
+        for (int i = 0; i < rows; ++i) {
+            char_buf b = fn(i);
+            b[63] = '\0';
+            if (std::strstr(b.data(), target.c_str()) != nullptr) setBit(i);
+        }
+    }
+}
+
+void MmappedTable::SetFilters(const std::vector<ColumnFilter>& filters, wxGrid* gridPtr) {
+    const int oldVisible = VisibleRows();
+
+    activeFilters = filters;
+
+    if (activeFilters.empty() || rows == 0) {
+        filteredRows.clear();
+        filterActive = false;
+    } else {
+        const size_t words = (static_cast<size_t>(rows) + 63) / 64;
+        std::vector<uint64_t> acc(words, ~0ull), tmp(words);
+        // Mask off the padding bits in the last word so they never survive AND.
+        if (const int rem = rows & 63) acc.back() = (1ull << rem) - 1;
+
+        for (const ColumnFilter& f : activeFilters) {
+            EvalFilter(f, tmp);
+            for (size_t w = 0; w < words; ++w) acc[w] &= tmp[w];
+        }
+
+        filteredRows.clear();
+        for (int i = 0; i < rows; ++i) {
+            if (acc[i >> 6] & (1ull << (i & 63))) filteredRows.push_back(i);
+        }
+        filterActive = true;
+    }
+
+    // Refresh the grid: reconcile the row-count change so wxGrid reallocates
+    // its row geometry, then repaint.
+    if (gridPtr) {
+        const int newVisible = VisibleRows();
+        if (newVisible < oldVisible) {
+            wxGridTableMessage msg(this, wxGRIDTABLE_NOTIFY_ROWS_DELETED,
+                                   newVisible, oldVisible - newVisible);
+            gridPtr->ProcessTableMessage(msg);
+        } else if (newVisible > oldVisible) {
+            wxGridTableMessage msg(this, wxGRIDTABLE_NOTIFY_ROWS_APPENDED,
+                                   newVisible - oldVisible);
+            gridPtr->ProcessTableMessage(msg);
+        }
+        gridPtr->ForceRefresh();
+    }
+}
+
+void MmappedTable::ClearFilters(wxGrid* gridPtr) {
+    SetFilters({}, gridPtr);
+}
+
 bool MmappedTable::SaveOverrides(std::string& errorOut) {
     errorOut.clear();
     // Header size of <col>.stats.bin; records follow (see chunk_stats.hpp).
@@ -218,6 +318,19 @@ StatsResult MmappedTable::ComputeColumnStats(int col, int rowBegin, int rowEnd) 
     if (col < 0 || col >= static_cast<int>(columns.size()) || rows == 0) {
         return {};
     }
+
+    // With a filter active, statistics cover only the visible (matching) rows.
+    // The incoming [rowBegin, rowEnd] is in view space; scan those filtered
+    // rows directly (the chunk index doesn't apply to a sparse row set).
+    if (filterActive) {
+        rowBegin = std::max(rowBegin, 0);
+        rowEnd = std::min(rowEnd, static_cast<int>(filteredRows.size()) - 1);
+        if (rowEnd < rowBegin) return {};
+        std::vector<int> sub(filteredRows.begin() + rowBegin,
+                             filteredRows.begin() + rowEnd + 1);
+        return ComputeStatsRows(columns[col], sub);
+    }
+
     rowBegin = std::max(rowBegin, 0);
     rowEnd = std::min(rowEnd, rows - 1);
 
@@ -378,8 +491,11 @@ StatsResult MmappedTable::ComputeFormulaStats(
     if (rows == 0) {
         return {};
     }
+    // View-space clamp: the visible row count is the filtered count when a
+    // filter is active, otherwise the full table.
+    const int maxRow = VisibleRows() - 1;
     rowBegin = std::max(rowBegin, 0);
-    rowEnd = std::min(rowEnd, rows - 1);
+    rowEnd = std::min(rowEnd, maxRow);
     if (rowEnd < rowBegin) {
         return {};
     }
@@ -417,9 +533,15 @@ StatsResult MmappedTable::ComputeFormulaStats(
             StatsResult r;
             r.scalar = true;
             r.valid = true;
-            r.value = (*fn)(rowBegin);
+            // Evaluate at the first visible (underlying) row.
+            r.value = (*fn)(UnderlyingRow(rowBegin));
             r.usedIndex = aggregateIndexUsed;
             return r;
+        }
+        if (filterActive) {
+            std::vector<int> sub(filteredRows.begin() + rowBegin,
+                                 filteredRows.begin() + rowEnd + 1);
+            return ScanFnRows(*fn, sub);
         }
         return ScanFn(*fn, rowBegin, rowEnd);
     }
@@ -483,7 +605,7 @@ void MmappedTable::AddDerivedColumn(const wxString& expr, wxGrid* gridPtr) {
 }
 
 int MmappedTable::GetNumberRows() {
-    return rows;
+    return VisibleRows();
 }
 
 int MmappedTable::GetNumberCols() {
@@ -491,11 +613,13 @@ int MmappedTable::GetNumberCols() {
 }
 
 bool MmappedTable::IsEmptyCell(int row, int col) {
-    return row < 0 || row >= rows || col < 0 || col >= static_cast<int>(columns.size());
+    return row < 0 || row >= VisibleRows() || col < 0 ||
+           col >= static_cast<int>(columns.size());
 }
 
 wxString MmappedTable::GetValue(int row, int col) {
     if (IsEmptyCell(row, col)) return "N/A";
+    row = UnderlyingRow(row);
     Column& c = columns[col];
 
     return std::visit([row](auto&& f) -> wxString {
@@ -514,9 +638,11 @@ wxString MmappedTable::GetValue(int row, int col) {
 }
 
 void MmappedTable::SetValue(int row, int col, const wxString& value) {
-    if (row < 0 || row >= rows || col < 0 || col >= static_cast<int>(columns.size())) {
+    if (row < 0 || row >= VisibleRows() || col < 0 ||
+        col >= static_cast<int>(columns.size())) {
         return;
     }
+    row = UnderlyingRow(row);
     if (col >= numBaseCols) {
         wxMessageBox("Derived columns are computed from their formula; edit the input columns instead.",
                      "Read-only column", wxICON_WARNING);
@@ -575,5 +701,7 @@ wxString MmappedTable::GetColLabelValue(int col) {
 }
 
 wxString MmappedTable::GetRowLabelValue(int row) {
-    return wxString::Format("%d", row + 1); // 1-based, like Excel (A1 = first row)
+    // Show the underlying row number so filtered rows keep their real identity.
+    const int underlying = UnderlyingRow(row);
+    return wxString::Format("%d", (underlying < 0 ? row : underlying) + 1);
 }

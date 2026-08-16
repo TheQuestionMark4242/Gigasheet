@@ -17,6 +17,7 @@ private:
     void OnSave(wxCommandEvent&);
     void OnAddColumn(wxCommandEvent&);
     void OnStatistics(wxCommandEvent&);
+    void OnFilter(wxCommandEvent&);
     void OnClose(wxCloseEvent&);
     void OnTimer(wxTimerEvent&);
     void OnGridSelectCell(wxGridEvent&);

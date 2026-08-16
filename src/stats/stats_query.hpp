@@ -47,3 +47,15 @@ StatsResult ScanFn(
     const std::function<double(int)>& fn,
     int rowBegin,
     int rowEnd);
+
+// Like ComputeStats but over an explicit list of (underlying) row indices —
+// used when a row filter is active. Always a direct scan (no chunk index,
+// since the rows are sparse). CHARBUF columns get count only.
+StatsResult ComputeStatsRows(
+    const Column& column,
+    const std::vector<int>& rowsList);
+
+// Like ScanFn but over an explicit list of (underlying) row indices.
+StatsResult ScanFnRows(
+    const std::function<double(int)>& fn,
+    const std::vector<int>& rowsList);

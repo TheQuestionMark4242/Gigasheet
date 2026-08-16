@@ -93,6 +93,67 @@ StatsResult ComputeStats(
     return r;
 }
 
+StatsResult ComputeStatsRows(
+    const Column& column,
+    const std::vector<int>& rowsList)
+{
+    StatsResult r;
+    r.count = static_cast<std::uint64_t>(rowsList.size());
+    if (rowsList.empty()) {
+        return r;
+    }
+    if (column.type == ColumnType::CHARBUF) {
+        return r; // count only
+    }
+
+    r.intSum = column.type == ColumnType::INT32;
+    r.min = std::numeric_limits<double>::infinity();
+    r.max = -std::numeric_limits<double>::infinity();
+
+    if (column.type == ColumnType::INT32) {
+        const auto& f = std::get<FnInt>(column.fn);
+        for (const int i : rowsList) {
+            const std::int32_t v = f(i);
+            r.isum += v;
+            const double d = static_cast<double>(v);
+            if (d < r.min) r.min = d;
+            if (d > r.max) r.max = d;
+        }
+        r.sum = static_cast<double>(r.isum);
+    } else {
+        const auto& f = std::get<FnDbl>(column.fn);
+        for (const int i : rowsList) {
+            const double d = f(i);
+            r.sum += d;
+            if (d < r.min) r.min = d;
+            if (d > r.max) r.max = d;
+        }
+    }
+    r.valid = true;
+    return r;
+}
+
+StatsResult ScanFnRows(
+    const std::function<double(int)>& fn,
+    const std::vector<int>& rowsList)
+{
+    StatsResult r;
+    r.count = static_cast<std::uint64_t>(rowsList.size());
+    if (rowsList.empty()) {
+        return r;
+    }
+    r.min = std::numeric_limits<double>::infinity();
+    r.max = -std::numeric_limits<double>::infinity();
+    for (const int i : rowsList) {
+        const double d = fn(i);
+        r.sum += d;
+        if (d < r.min) r.min = d;
+        if (d > r.max) r.max = d;
+    }
+    r.valid = true;
+    return r;
+}
+
 StatsResult ScanFn(
     const std::function<double(int)>& fn,
     int rowBegin,

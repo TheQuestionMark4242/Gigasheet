@@ -16,6 +16,23 @@
 #include "../stats/stats_query.hpp"
 #include "../stats/stats_reader.hpp"
 
+// A single column predicate. Numeric columns (INT32/DOUBLE) use a closed range
+// [lo, hi]; text columns (CHARBUF) match on equality or substring against
+// `text`. Multiple filters are combined with AND (see ApplyFilters).
+struct ColumnFilter {
+    enum class Kind { Range, Equals, Contains };
+
+    int col = -1;
+    Kind kind = Kind::Range;
+
+    // Range predicate (numeric columns).
+    double lo = 0.0;
+    double hi = 0.0;
+
+    // Equals / Contains predicate (text columns).
+    std::string text;
+};
+
 class MmappedTable : public wxGridTableBase {
 public:
     /** 
@@ -41,6 +58,30 @@ public:
         std::string& errorOut) const;
 
     const Column& GetColumn(int col) const { return columns[col]; }
+
+    // -------- Filtering (bitvector full-scan predicate evaluation) --------
+    // Replace the active filter set and rebuild the filtered-row view by
+    // scanning the mmapped columns into per-predicate bitvectors and AND-ing
+    // them. gridPtr (if given) is notified so the view refreshes. Passing an
+    // empty list clears filtering (the full table is shown again).
+    void SetFilters(const std::vector<ColumnFilter>& filters, wxGrid* gridPtr);
+    void ClearFilters(wxGrid* gridPtr);
+
+    bool IsFiltered() const { return filterActive; }
+    const std::vector<ColumnFilter>& ActiveFilters() const { return activeFilters; }
+
+    // Rows currently visible: the filtered count when a filter is active,
+    // otherwise the full table. TotalRows() is always the underlying count.
+    int VisibleRows() const { return filterActive ? static_cast<int>(filteredRows.size()) : rows; }
+    int TotalRows() const { return rows; }
+
+    // Translate a grid (view) row into an underlying table row. When no filter
+    // is active this is the identity.
+    int UnderlyingRow(int viewRow) const {
+        if (!filterActive) return viewRow;
+        if (viewRow < 0 || viewRow >= static_cast<int>(filteredRows.size())) return -1;
+        return filteredRows[viewRow];
+    }
 
     bool HasChunkStats(int col) const {
         return col < numBaseCols && statsIndex.HasStats(col);
@@ -94,4 +135,12 @@ private:
     std::string dirPath;                   // table directory (for Save)
     int numBaseCols = 0;                   // columns backed by files (not derived)
     int rows = 0;
+
+    // -------- Filtered view state --------
+    // Evaluate one predicate over every row into `out` (one bit per row).
+    void EvalFilter(const ColumnFilter& f, std::vector<uint64_t>& out) const;
+
+    std::vector<ColumnFilter> activeFilters;   // AND-combined predicates
+    std::vector<int> filteredRows;             // view row -> underlying row
+    bool filterActive = false;
 };

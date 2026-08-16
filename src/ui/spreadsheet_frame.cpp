@@ -18,6 +18,7 @@
 #include <exception>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <string>
 #include <thread>
 #include <utility>
@@ -237,6 +238,7 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     actions->Add(navButton("Save",       [this]{ wxCommandEvent e; OnSave(e); }),       0, wxRIGHT, 4);
     actions->Add(navButton("Add Column", [this]{ wxCommandEvent e; OnAddColumn(e); }),  0, wxRIGHT, 4);
     actions->Add(navButton("Statistics", [this]{ wxCommandEvent e; OnStatistics(e); }), 0, wxRIGHT, 4);
+    actions->Add(navButton("Filter",     [this]{ wxCommandEvent e; OnFilter(e); }),     0, wxRIGHT, 4);
     actions->Add(navButton("Appearance", [this]{ OnAppearance(); }), 0, wxRIGHT, 4);
     topSizer->Add(actions, 0, wxLEFT | wxTOP, 8);
 
@@ -461,9 +463,16 @@ void SpreadsheetFrame::OnTimer(wxTimerEvent&) {
 }
 
 void SpreadsheetFrame::UpdateStatus() {
+    wxString rowsText;
+    if (table->IsFiltered()) {
+        rowsText = wxString::Format("Showing %d of %d rows",
+                                    table->VisibleRows(), table->TotalRows());
+    } else {
+        rowsText = wxString::Format("Rows: %d", table->TotalRows());
+    }
     wxString text = wxString::Format(
-        "Rows: %d | Columns: %d | RAM: %.1f MB",
-        table->GetNumberRows(),
+        "%s | Columns: %d | RAM: %.1f MB",
+        rowsText,
         table->GetNumberCols(),
         get_memory_usage_MB());
 
@@ -561,6 +570,152 @@ void SpreadsheetFrame::OnClose(wxCloseEvent& event) {
 
 void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
     StatisticsDialog dlg(this, table, grid->GetGridCursorCol());
+    dlg.ShowModal();
+}
+
+void SpreadsheetFrame::OnFilter(wxCommandEvent&) {
+    const int numCols = table->GetNumberCols();
+    if (numCols == 0) return;
+
+    wxDialog dlg(this, wxID_ANY, "Filter Rows",
+        wxDefaultPosition, wxDefaultSize,
+        wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+
+    // Column picker.
+    wxArrayString colNames;
+    for (int i = 0; i < numCols; ++i) colNames.Add(table->GetColLabelValue(i));
+    auto* colChoice = new wxChoice(&dlg, wxID_ANY, wxDefaultPosition,
+                                   wxDefaultSize, colNames);
+    colChoice->SetSelection(std::max(0, grid->GetGridCursorCol()));
+
+    // Text-match kind (used only for CHARBUF columns).
+    wxArrayString matchKinds;
+    matchKinds.Add("contains");
+    matchKinds.Add("equals");
+    auto* matchChoice = new wxChoice(&dlg, wxID_ANY, wxDefaultPosition,
+                                     wxDefaultSize, matchKinds);
+    matchChoice->SetSelection(0);
+
+    // Numeric range inputs and a single text value input; only the relevant
+    // controls are shown for the selected column's type.
+    auto* loCtrl   = new wxTextCtrl(&dlg, wxID_ANY);
+    auto* hiCtrl   = new wxTextCtrl(&dlg, wxID_ANY);
+    auto* textCtrl = new wxTextCtrl(&dlg, wxID_ANY);
+
+    auto* loLabel   = new wxStaticText(&dlg, wxID_ANY, "Min:");
+    auto* hiLabel   = new wxStaticText(&dlg, wxID_ANY, "Max:");
+    auto* textLabel = new wxStaticText(&dlg, wxID_ANY, "Value:");
+    auto* matchLabel= new wxStaticText(&dlg, wxID_ANY, "Match:");
+
+    auto* activeLabel = new wxStaticText(&dlg, wxID_ANY, wxEmptyString);
+
+    auto isTextCol = [this](int col) {
+        return table->GetColumn(col).type == ColumnType::CHARBUF;
+    };
+    auto refreshActive = [&] {
+        const auto& fs = table->ActiveFilters();
+        if (fs.empty()) {
+            activeLabel->SetLabel("No active filters.");
+        } else {
+            activeLabel->SetLabel(
+                wxString::Format("%zu active filter(s) (combined with AND).",
+                                 fs.size()));
+        }
+    };
+
+    // Show/hide inputs to match the selected column's type.
+    auto syncInputs = [&] {
+        const bool text = isTextCol(colChoice->GetSelection());
+        loLabel->Show(!text);   loCtrl->Show(!text);
+        hiLabel->Show(!text);   hiCtrl->Show(!text);
+        matchLabel->Show(text); matchChoice->Show(text);
+        textLabel->Show(text);  textCtrl->Show(text);
+        dlg.Layout();
+    };
+    colChoice->Bind(wxEVT_CHOICE, [&](wxCommandEvent&) { syncInputs(); });
+
+    auto* form = new wxFlexGridSizer(2, wxSize(8, 6));
+    form->AddGrowableCol(1);
+    form->Add(new wxStaticText(&dlg, wxID_ANY, "Column:"), 0, wxALIGN_CENTER_VERTICAL);
+    form->Add(colChoice, 1, wxEXPAND);
+    form->Add(loLabel, 0, wxALIGN_CENTER_VERTICAL);   form->Add(loCtrl, 1, wxEXPAND);
+    form->Add(hiLabel, 0, wxALIGN_CENTER_VERTICAL);   form->Add(hiCtrl, 1, wxEXPAND);
+    form->Add(matchLabel, 0, wxALIGN_CENTER_VERTICAL);form->Add(matchChoice, 1, wxEXPAND);
+    form->Add(textLabel, 0, wxALIGN_CENTER_VERTICAL); form->Add(textCtrl, 1, wxEXPAND);
+
+    // Custom buttons: Add filter, Clear all, Close.
+    auto* addBtn   = new wxButton(&dlg, wxID_ANY, "Add Filter");
+    auto* clearBtn = new wxButton(&dlg, wxID_ANY, "Clear All");
+    auto* closeBtn = new wxButton(&dlg, wxID_CANCEL, "Close");
+    auto* btns = new wxBoxSizer(wxHORIZONTAL);
+    btns->Add(addBtn, 0, wxRIGHT, 6);
+    btns->Add(clearBtn, 0, wxRIGHT, 6);
+    btns->AddStretchSpacer();
+    btns->Add(closeBtn, 0);
+
+    auto* top = new wxBoxSizer(wxVERTICAL);
+    top->Add(new wxStaticText(&dlg, wxID_ANY,
+        "Add one or more filters. Rows must match every filter (AND)."),
+        0, wxALL, 10);
+    top->Add(form, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+    top->Add(activeLabel, 0, wxALL, 10);
+    top->Add(btns, 0, wxEXPAND | wxALL, 10);
+    dlg.SetSizerAndFit(top);
+    dlg.SetMinSize(wxSize(420, dlg.GetMinSize().y));
+    dlg.SetSize(wxSize(420, -1));
+
+    refreshActive();
+    syncInputs();
+
+    addBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        const int col = colChoice->GetSelection();
+        if (col < 0) return;
+
+        ColumnFilter f;
+        f.col = col;
+        if (isTextCol(col)) {
+            f.kind = matchChoice->GetSelection() == 1
+                         ? ColumnFilter::Kind::Equals
+                         : ColumnFilter::Kind::Contains;
+            f.text = textCtrl->GetValue().utf8_string();
+        } else {
+            const wxString loS = loCtrl->GetValue().Strip(wxString::both);
+            const wxString hiS = hiCtrl->GetValue().Strip(wxString::both);
+            // An empty bound is unbounded on that side.
+            double lo = -std::numeric_limits<double>::infinity();
+            double hi =  std::numeric_limits<double>::infinity();
+            if (!loS.IsEmpty() && !loS.ToDouble(&lo)) {
+                wxMessageBox("Min is not a valid number.", "Invalid filter",
+                             wxICON_ERROR, &dlg);
+                return;
+            }
+            if (!hiS.IsEmpty() && !hiS.ToDouble(&hi)) {
+                wxMessageBox("Max is not a valid number.", "Invalid filter",
+                             wxICON_ERROR, &dlg);
+                return;
+            }
+            f.kind = ColumnFilter::Kind::Range;
+            f.lo = lo;
+            f.hi = hi;
+        }
+
+        std::vector<ColumnFilter> filters = table->ActiveFilters();
+        filters.push_back(f);
+        {
+            wxBusyCursor busy;
+            table->SetFilters(filters, grid);
+        }
+        refreshActive();
+        UpdateStatus();
+    });
+
+    clearBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        wxBusyCursor busy;
+        table->ClearFilters(grid);
+        refreshActive();
+        UpdateStatus();
+    });
+
     dlg.ShowModal();
 }
 
