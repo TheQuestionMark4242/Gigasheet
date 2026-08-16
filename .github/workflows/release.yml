@@ -1,13 +1,24 @@
 name: Release Windows
 
+# Publishes a self-contained Windows build (exe + all MinGW/wxWidgets runtime
+# DLLs) as a downloadable .zip attached to a GitHub Release. Triggered by
+# pushing a version tag (e.g. `git tag v1.0.0 && git push origin v1.0.0`), and
+# also runnable on demand from the Actions tab.
+
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v0.1.0). Manual runs only.'
+        required: false
+        default: 'v0.0.0-manual'
 
 permissions:
   contents: write
-  
+
 jobs:
   release-windows:
     runs-on: windows-latest
@@ -31,6 +42,16 @@ jobs:
             mingw-w64-x86_64-wxwidgets3.2-msw
             mingw-w64-x86_64-boost
 
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Configure
         shell: msys2 {0}
         run: |
@@ -43,43 +64,110 @@ jobs:
         run: |
           cmake --build build -j
 
-      - name: Create release directory
+      - name: Stage release files
         shell: msys2 {0}
         run: |
+          set -euo pipefail
           mkdir -p release
           cp build/spreadsheet.exe release/
+          # The app loads appicon.png from next to the exe at runtime.
+          if [ -f build/appicon.png ]; then
+            cp build/appicon.png release/
+          elif [ -f assets/appicon.png ]; then
+            cp assets/appicon.png release/
+          fi
 
-      - name: Collect runtime DLLs
+      - name: Bundle runtime DLLs (recursive closure)
         shell: msys2 {0}
         run: |
-          ldd build/spreadsheet.exe > deps.txt
-
-          grep '/mingw64/bin/.*\.dll' deps.txt \
-            | awk '{print $3}' \
-            | sort -u \
-            | while read dll
-          do
-            cp "$dll" release/
+          set -euo pipefail
+          # Walk the full dependency closure so a clean Windows machine (no
+          # MSYS2 installed) has every DLL the exe transitively needs. ldd on
+          # each newly found DLL discovers indirect dependencies too.
+          declare -A seen
+          queue="$(ldd build/spreadsheet.exe | grep -i '/mingw64/bin/' | awk '{print $3}')"
+          while [ -n "$queue" ]; do
+            next=""
+            for dll in $queue; do
+              [ -z "$dll" ] && continue
+              if [ -z "${seen[$dll]:-}" ]; then
+                seen[$dll]=1
+                cp -n "$dll" release/ || true
+                deps="$(ldd "$dll" 2>/dev/null | grep -i '/mingw64/bin/' | awk '{print $3}')"
+                next="$next $deps"
+              fi
+            done
+            queue="$next"
           done
+          echo "Bundled DLLs: $(ls -1 release/*.dll 2>/dev/null | wc -l)"
+
+      - name: Verify bundle is self-contained
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          # Every non-system DLL the exe needs must now sit in release/. If ldd
+          # still resolves any dependency from /mingw64 (i.e. not shipped), fail
+          # so we never publish a bundle that breaks on a clean machine.
+          cd release
+          missing="$(ldd spreadsheet.exe | grep -i '/mingw64/bin/' || true)"
+          if [ -n "$missing" ]; then
+            echo "::error::These DLLs resolve outside the bundle and would be missing on a clean machine:"
+            echo "$missing"
+            exit 1
+          fi
+          echo "OK: exe resolves only bundled DLLs + Windows system DLLs."
+
+      - name: Add run instructions
+        shell: bash
+        run: |
+          cat > release/README.txt <<'EOF'
+          Gigasheet (Windows build)
+          =========================
+
+          To run: unzip this folder anywhere and double-click spreadsheet.exe.
+
+          Everything the app needs (the wxWidgets and MinGW runtime DLLs) is
+          included in this folder, so no extra installation is required. Keep
+          spreadsheet.exe together with the .dll files and appicon.png.
+
+          Usage:
+            - Open a CSV via the "Open" button to import a dataset, or pass a
+              prepared dataset directory as the first argument:
+                  spreadsheet.exe path\to\dataset_dir
+            - Use "Enable Filtering" then click a column header to filter rows.
+            - "Add Column" adds derived columns from formulas; "Statistics"
+              computes SUM/AVG/MIN/MAX/COUNT over a formula.
+          EOF
 
       - name: Show packaged files
         shell: msys2 {0}
         run: |
           ls -lah release
+          echo "Total size:"
+          du -sh release
 
       - name: Create zip
         shell: msys2 {0}
         run: |
+          set -euo pipefail
+          name="gigasheet-windows-${{ steps.ver.outputs.version }}"
           cd release
-          zip -r ../gigasheet-windows.zip .
+          zip -r "../${name}.zip" .
+          cd ..
+          echo "ZIP_NAME=${name}.zip" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gigasheet-windows
-          path: gigasheet-windows.zip
+          name: gigasheet-windows-${{ steps.ver.outputs.version }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
 
       - name: Create GitHub Release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: gigasheet-windows.zip
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: Gigasheet ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: ${{ env.ZIP_NAME }}
