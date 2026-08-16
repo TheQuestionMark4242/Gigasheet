@@ -764,6 +764,10 @@ bool SpreadsheetFrame::DoSave() {
 
     const size_t count = table->UnsavedCellCount();
     wxBusyCursor busy;
+    // Capture which rows were edited before SaveOverrides clears the override
+    // maps; the CSV write-back re-serializes only these and copies the rest
+    // verbatim.
+    const std::vector<int> editedRows = table->PendingEditedRows();
     std::string error;
     if (!table->SaveOverrides(error)) {
         wxMessageBox(error, "Save Failed", wxICON_ERROR, this);
@@ -786,7 +790,7 @@ bool SpreadsheetFrame::DoSave() {
             wxString::Format("Writing %s", wxFileName(originalCsvPath).GetFullName()),
             [&] {
                 csvWritten = table->ExportBaseColumnsToCsv(
-                    originalCsvPath.ToStdString(), csvError, &newSha);
+                    originalCsvPath.ToStdString(), editedRows, csvError, &newSha);
             });
         if (!csvWritten) {
             wxMessageBox(

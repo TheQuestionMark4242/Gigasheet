@@ -11,11 +11,11 @@
 #include <ostream>
 #include <streambuf>
 #include <string>
+#include <string_view>
 #include <stdexcept>
 
 #include <wx/msgdlg.h>
 
-#include "../../third-party/csv-parser/csv.hpp"
 #include "../parser/expr_eval.hpp"
 #include "../parser/parser_driver.hpp"
 #include "../util/sha256.hpp"
@@ -390,9 +390,81 @@ private:
     std::streambuf* dest_;
     sha256_detail::Ctx ctx_;
 };
+
+// Append `s` to `out` as one CSV field, RFC-4180 quoted only when needed
+// (matches the csv-parser writer's quote_minimal behaviour).
+void AppendCsvEscaped(std::string& out, const char* s) {
+    std::string_view v(s);
+    if (v.find_first_of(",\"\r\n") == std::string_view::npos) {
+        out.append(v.data(), v.size());
+        return;
+    }
+    out.push_back('"');
+    for (char c : v) {
+        if (c == '"') out.push_back('"');
+        out.push_back(c);
+    }
+    out.push_back('"');
+}
+
+// Byte offsets where each CSV record starts (header is record 0), found with a
+// quote-aware scan: a record ends at a newline that is not inside quotes (so
+// newlines embedded in quoted fields don't split a record). Record k spans
+// [starts[k], starts[k+1]) — or [starts.back(), n) for the last — newline
+// included.
+void ScanCsvRecordStarts(const unsigned char* p, std::size_t n,
+                         std::vector<std::size_t>& starts) {
+    starts.clear();
+    if (n == 0) return;
+    starts.push_back(0);
+    bool inQuotes = false;
+    for (std::size_t i = 0; i < n; ++i) {
+        const unsigned char c = p[i];
+        if (c == '"') {
+            inQuotes = !inQuotes; // "" (escaped quote) toggles twice -> no-op
+        } else if (c == '\n' && !inQuotes) {
+            if (i + 1 < n) starts.push_back(i + 1);
+        }
+    }
+}
 } // namespace
 
+void MmappedTable::AppendCsvRow(int row, std::string& out) const {
+    char numbuf[32];
+    for (int col = 0; col < numBaseCols; ++col) {
+        if (col) out.push_back(',');
+        const Column& c = columns[col];
+        if (c.type == ColumnType::INT32) {
+            const int len = std::snprintf(numbuf, sizeof(numbuf), "%d",
+                                          std::get<FnInt>(c.fn)(row));
+            if (len > 0) out.append(numbuf, static_cast<std::size_t>(len));
+        } else if (c.type == ColumnType::DOUBLE) {
+            // %.15g round-trips a double without gratuitous trailing zeros
+            // (whole values print as e.g. "3", not "3.000000").
+            const int len = std::snprintf(numbuf, sizeof(numbuf), "%.15g",
+                                          std::get<FnDbl>(c.fn)(row));
+            if (len > 0) out.append(numbuf, static_cast<std::size_t>(len));
+        } else { // CHARBUF
+            char_buf b = std::get<FnChar>(c.fn)(row);
+            b[63] = '\0';
+            AppendCsvEscaped(out, b.data());
+        }
+    }
+    out.push_back('\n');
+}
+
+std::vector<int> MmappedTable::PendingEditedRows() const {
+    std::vector<int> out;
+    for (int col = 0; col < numBaseCols; ++col) {
+        for (const auto& kv : overrides[col]) out.push_back(kv.first);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
 bool MmappedTable::ExportBaseColumnsToCsv(const std::string& path,
+                                          const std::vector<int>& editedRows,
                                           std::string& errorOut,
                                           std::string* newShaOut) {
     errorOut.clear();
@@ -402,56 +474,87 @@ bool MmappedTable::ExportBaseColumnsToCsv(const std::string& path,
     const fs::path tmp = target.parent_path() /
         (target.filename().string() + ".gigasheet.tmp");
 
+    // Map the current file and scan its record boundaries for the splice fast
+    // path. If it doesn't scan into exactly (header + rows) records, we can't
+    // trust the byte ranges, so we fall back to a full rewrite.
+    mio::mmap_source src;
+    std::vector<std::size_t> starts;
+    bool canSplice = false;
+    {
+        std::error_code mec;
+        src.map(target.string(), mec);
+        if (!mec && src.size() > 0) {
+            ScanCsvRecordStarts(
+                reinterpret_cast<const unsigned char*>(src.data()), src.size(),
+                starts);
+            canSplice = (starts.size() == static_cast<std::size_t>(rows) + 1);
+        }
+    }
+
     {
         std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
         if (!file) {
             errorOut = "Failed to open for writing: " + tmp.string();
             return false;
         }
-
-        // Tee the CSV writer's output through a SHA-256 accumulator.
+        // Fingerprint the output as we write it (single pass, no re-read).
         Sha256TeeBuf tee(file.rdbuf());
         std::ostream out(&tee);
 
-        // Vince's CSV writer handles RFC-4180 quoting. Crucially we disable
-        // auto-flush: by default it flushes the stream after *every* row, which
-        // makes writing a large file pathologically slow. With it off, output
-        // is batched (64 KB) and flushed in bulk.
-        auto writer = csv::make_csv_writer(out);
-        writer.set_auto_flush(false);
+        if (canSplice) {
+            const char* base = src.data();
+            const std::size_t n = src.size();
+            auto recEnd = [&](std::size_t k) {
+                return (k + 1 < starts.size()) ? starts[k + 1] : n;
+            };
 
-        // Reused per-row buffer of field strings (fed to the writer as a range).
-        std::vector<std::string> record(static_cast<std::size_t>(numBaseCols));
+            // Header (record 0) verbatim.
+            out.write(base + starts[0],
+                      static_cast<std::streamsize>(recEnd(0) - starts[0]));
 
-        // Header row: base column labels.
-        for (int col = 0; col < numBaseCols; ++col) record[col] = columns[col].label;
-        writer << record;
+            // Copy unedited rows verbatim in bulk runs; re-serialize edited ones.
+            // editedRows are underlying data-row indices; record index = row + 1.
+            std::vector<int> edits(editedRows);
+            std::sort(edits.begin(), edits.end());
+            edits.erase(std::unique(edits.begin(), edits.end()), edits.end());
 
-        char numbuf[32];
-        // One line per underlying row (full table, ignoring any active filter).
-        for (int row = 0; row < rows; ++row) {
-            for (int col = 0; col < numBaseCols; ++col) {
-                const Column& c = columns[col];
-                if (c.type == ColumnType::INT32) {
-                    std::snprintf(numbuf, sizeof(numbuf), "%d",
-                                  std::get<FnInt>(c.fn)(row));
-                    record[col] = numbuf;
-                } else if (c.type == ColumnType::DOUBLE) {
-                    // %.15g round-trips a double without gratuitous trailing
-                    // zeros (whole values print as e.g. "3", not "3.000000").
-                    std::snprintf(numbuf, sizeof(numbuf), "%.15g",
-                                  std::get<FnDbl>(c.fn)(row));
-                    record[col] = numbuf;
-                } else { // CHARBUF
-                    char_buf b = std::get<FnChar>(c.fn)(row);
-                    b[63] = '\0';
-                    record[col].assign(b.data());
+            std::string buf;
+            std::size_t nextData = recEnd(0); // start of the next verbatim run
+            for (int e : edits) {
+                if (e < 0 || e >= rows) continue;
+                const std::size_t recIdx = static_cast<std::size_t>(e) + 1;
+                const std::size_t rs = starts[recIdx];
+                const std::size_t re = recEnd(recIdx);
+                if (rs > nextData) {
+                    out.write(base + nextData,
+                              static_cast<std::streamsize>(rs - nextData));
                 }
+                buf.clear();
+                AppendCsvRow(e, buf);
+                out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
+                nextData = re;
             }
-            writer << record;
+            if (n > nextData) {
+                out.write(base + nextData,
+                          static_cast<std::streamsize>(n - nextData));
+            }
+        } else {
+            // Full rewrite: re-serialize the header and every row.
+            std::string buf;
+            for (int col = 0; col < numBaseCols; ++col) {
+                if (col) buf.push_back(',');
+                AppendCsvEscaped(buf, columns[col].label.c_str());
+            }
+            buf.push_back('\n');
+            out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
+            for (int row = 0; row < rows; ++row) {
+                buf.clear();
+                AppendCsvRow(row, buf);
+                out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
+            }
         }
 
-        writer.flush();
+        out.flush();
         if (!file) {
             errorOut = "Write failed: " + tmp.string();
             std::error_code ec; fs::remove(tmp, ec);
@@ -459,6 +562,10 @@ bool MmappedTable::ExportBaseColumnsToCsv(const std::string& path,
         }
         if (newShaOut) *newShaOut = tee.hex();
     }
+
+    // Release the mapping before replacing the file: Windows won't let a
+    // memory-mapped file be renamed over.
+    src.unmap();
 
     std::error_code ec;
     fs::rename(tmp, target, ec);

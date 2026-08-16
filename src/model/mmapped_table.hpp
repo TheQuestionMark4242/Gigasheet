@@ -135,18 +135,29 @@ public:
     // unwritten edits are kept.
     bool SaveOverrides(std::string& errorOut);
 
-    // Rewrite `path` as a CSV reflecting the current table contents: a header
-    // row of the base column labels followed by one line per underlying row
-    // (the full table, ignoring any active filter). Call after SaveOverrides so
-    // saved edits are included. Derived columns are omitted (they aren't part of
-    // the source file). Writes to a temp file and renames it into place; on
-    // failure the original is left untouched and errorOut is set.
+    // Write saved edits back to the CSV at `path`, keeping it in sync with the
+    // internal format. Call after SaveOverrides.
+    //
+    // Fast path (typical: a handful of scattered edits): the current file is
+    // scanned into per-row byte ranges and rewritten by copying unedited rows
+    // verbatim and re-serializing only the rows in `editedRows` (underlying row
+    // indices). This avoids reformatting millions of untouched cells and keeps
+    // their original text exactly. If the file can't be scanned into exactly the
+    // expected number of records, it falls back to a full rewrite (every row
+    // re-serialized from the columnar store).
     //
     // Safe to call off the GUI thread (reads the mmap, touches no widgets). If
     // newShaOut is non-null it receives the SHA-256 of the written file,
-    // computed during the single write pass so callers needn't re-read it.
-    bool ExportBaseColumnsToCsv(const std::string& path, std::string& errorOut,
+    // computed during the write pass so callers needn't re-read it.
+    bool ExportBaseColumnsToCsv(const std::string& path,
+                                const std::vector<int>& editedRows,
+                                std::string& errorOut,
                                 std::string* newShaOut = nullptr);
+
+    // Underlying row indices with a pending (unsaved) edit in any base column,
+    // sorted and de-duplicated. Capture this before SaveOverrides clears the
+    // override maps, then pass it to ExportBaseColumnsToCsv.
+    std::vector<int> PendingEditedRows() const;
 
     // -------- wxGridTableBase overrides ----------
     int GetNumberRows() override;
@@ -158,6 +169,11 @@ public:
     wxString GetRowLabelValue(int row) override;
 
 private:
+    // Append base column `row` as one CSV line (trailing '\n') to `out`, with
+    // RFC-4180 quoting; integers as %d, doubles as %.15g. Used by the CSV
+    // write-back to (re)serialize edited rows.
+    void AppendCsvRow(int row, std::string& out) const;
+
     // Column names (labels and A..Z aliases) visible to expressions.
     exprparse::TypedColumnMap BuildColumnMap() const;
 
