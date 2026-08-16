@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -104,7 +105,8 @@ size_t WriteDataFiles(
     csv::CSVReader& reader,
     const fs::path& outputDir,
     const std::vector<ColumnType>& types,
-    std::vector<ChunkAccumulator>& accumulators
+    std::vector<ChunkAccumulator>& accumulators,
+    const std::atomic<bool>* cancel
 ) {
     std::vector<std::ofstream> outs;
     outs.reserve(types.size());
@@ -227,6 +229,13 @@ size_t WriteDataFiles(
             flushBuffers();
             bufferedRows = 0;
         }
+        // Abort a speculative import promptly once cancellation is signalled.
+        // Checked every 64K rows: frequent enough to be responsive, rare enough
+        // to be free relative to per-row parsing.
+        if (cancel && (totalRows & 0xFFFF) == 0 &&
+            cancel->load(std::memory_order_relaxed)) {
+            throw ImportCancelled{};
+        }
     }
 
     flushBuffers();
@@ -244,7 +253,8 @@ csv::CSVFormat MakeFormat() {
 
 std::filesystem::path ImportCsv(
     const fs::path& inputPath,
-    const fs::path& outputDir) 
+    const fs::path& outputDir,
+    const std::atomic<bool>* cancel)
 {
     const csv::CSVFormat format = MakeFormat();
 
@@ -285,7 +295,7 @@ std::filesystem::path ImportCsv(
     }
 
     auto writeReader = csv::CSVReader(inputPath.string(), format);
-    const size_t totalRows = WriteDataFiles(writeReader, outputDir, types, accumulators);
+    const size_t totalRows = WriteDataFiles(writeReader, outputDir, types, accumulators, cancel);
 
     WriteStatsFiles(outputDir, accumulators, totalRows);
 

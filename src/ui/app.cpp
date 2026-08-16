@@ -31,6 +31,9 @@ bool SpreadsheetApp::OnInit() {
 #ifdef __WXMSW__
     EnableDpiAwareness();
 #endif
+    // Drives wxStandardPaths::GetUserDataDir() -> %APPDATA%\Gigasheet, where
+    // converted datasets are stored.
+    SetAppName("Gigasheet");
     // No argument: open an empty window (the user imports a CSV via "Open").
     // An argument is treated as a prepared dataset directory to load.
     wxString dir = (argc > 1) ? wxString(argv[1]) : wxString();

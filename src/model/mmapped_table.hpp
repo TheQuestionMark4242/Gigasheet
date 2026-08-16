@@ -65,6 +65,14 @@ public:
 
     const Column& GetColumn(int col) const { return columns[col]; }
 
+    // The plain column label with no filter marker (▼/▽). Use this wherever a
+    // column name feeds an expression editor or menu; GetColLabelValue is for
+    // the grid header only.
+    wxString ColumnLabel(int col) const {
+        if (col < 0 || col >= static_cast<int>(columns.size())) return "";
+        return wxString::FromUTF8(columns[col].label);
+    }
+
     // -------- Filtering (bitvector full-scan predicate evaluation) --------
     // At most one predicate is active per column. Each predicate is evaluated
     // once into a cached bitvector (one bit per row); the visible view is the
@@ -126,6 +134,14 @@ public:
     // clears the override map. Returns false with errorOut set on failure;
     // unwritten edits are kept.
     bool SaveOverrides(std::string& errorOut);
+
+    // Rewrite `path` as a CSV reflecting the current table contents: a header
+    // row of the base column labels followed by one line per underlying row
+    // (the full table, ignoring any active filter). Call after SaveOverrides so
+    // saved edits are included. Derived columns are omitted (they aren't part of
+    // the source file). Writes to a temp file and renames it into place; on
+    // failure the original is left untouched and errorOut is set.
+    bool ExportBaseColumnsToCsv(const std::string& path, std::string& errorOut);
 
     // -------- wxGridTableBase overrides ----------
     int GetNumberRows() override;

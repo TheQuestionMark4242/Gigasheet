@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -353,6 +354,93 @@ bool MmappedTable::SaveOverrides(std::string& errorOut) {
             records.clear();
             errorOut = "Cell edits saved, but failed to update " + statsPath.string()
                 + "; the stats index for this column is disabled.";
+            return false;
+        }
+    }
+    return true;
+}
+
+namespace {
+// Quote a CSV field per RFC 4180: wrap in double quotes and double any embedded
+// quote when the value contains a comma, quote, CR or LF; otherwise pass through.
+std::string CsvEscape(const std::string& s) {
+    const bool needsQuote =
+        s.find_first_of(",\"\r\n") != std::string::npos;
+    if (!needsQuote) return s;
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('"');
+    for (char c : s) {
+        if (c == '"') out.push_back('"');
+        out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+} // namespace
+
+bool MmappedTable::ExportBaseColumnsToCsv(const std::string& path,
+                                          std::string& errorOut) {
+    errorOut.clear();
+    if (numBaseCols == 0) return true; // nothing to write
+
+    const fs::path target(path);
+    const fs::path tmp = target.parent_path() /
+        (target.filename().string() + ".gigasheet.tmp");
+
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            errorOut = "Failed to open for writing: " + tmp.string();
+            return false;
+        }
+
+        // Header row: base column labels.
+        for (int col = 0; col < numBaseCols; ++col) {
+            if (col) out.put(',');
+            out << CsvEscape(columns[col].label);
+        }
+        out.put('\n');
+
+        // One line per underlying row (full table, ignoring any active filter).
+        for (int row = 0; row < rows; ++row) {
+            for (int col = 0; col < numBaseCols; ++col) {
+                if (col) out.put(',');
+                const Column& c = columns[col];
+                if (c.type == ColumnType::INT32) {
+                    out << std::get<FnInt>(c.fn)(row);
+                } else if (c.type == ColumnType::DOUBLE) {
+                    // %.15g round-trips a double without gratuitous trailing
+                    // zeros (whole values print as e.g. "3", not "3.000000").
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%.15g",
+                                  std::get<FnDbl>(c.fn)(row));
+                    out << buf;
+                } else { // CHARBUF
+                    char_buf b = std::get<FnChar>(c.fn)(row);
+                    b[63] = '\0';
+                    out << CsvEscape(std::string(b.data()));
+                }
+            }
+            out.put('\n');
+        }
+
+        out.flush();
+        if (!out) {
+            errorOut = "Write failed: " + tmp.string();
+            std::error_code ec; fs::remove(tmp, ec);
+            return false;
+        }
+    }
+
+    std::error_code ec;
+    fs::rename(tmp, target, ec);
+    if (ec) {
+        // Cross-device or locked target: fall back to copy+remove.
+        fs::copy_file(tmp, target, fs::copy_options::overwrite_existing, ec);
+        std::error_code ec2; fs::remove(tmp, ec2);
+        if (ec) {
+            errorOut = "Failed to replace " + target.string() + ": " + ec.message();
             return false;
         }
     }

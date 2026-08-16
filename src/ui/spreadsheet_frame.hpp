@@ -71,6 +71,12 @@ private:
     // Display name of the loaded dataset, shown in the title bar.
     wxString sourceName;
 
+    // Directory of the loaded dataset (holds metadata.bin, *.bin, source.txt).
+    wxString datasetDir;
+    // Absolute path of the original CSV this dataset was imported from, so Save
+    // can write edits back to it. Empty if unknown (e.g. empty window).
+    wxString originalCsvPath;
+
     // Selected appearance preset (persisted next to the executable).
     wxString currentThemeName;
     wxString prefPath;

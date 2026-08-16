@@ -15,9 +15,9 @@ StatisticsDialog::StatisticsDialog(wxWindow* parent, MmappedTable* tablePtr, int
 
     wxString initialFormula;
     if (initialCol >= 0 && initialCol < numCols) {
-        initialFormula = "=" + formulahint::FormulaName(table->GetColLabelValue(initialCol));
+        initialFormula = "=" + formulahint::FormulaName(table->ColumnLabel(initialCol));
     } else if (numCols > 0) {
-        initialFormula = "=" + formulahint::FormulaName(table->GetColLabelValue(0));
+        initialFormula = "=" + formulahint::FormulaName(table->ColumnLabel(0));
     }
 
     formulaCtrl = new wxTextCtrl(this, wxID_ANY, initialFormula,
@@ -26,7 +26,7 @@ StatisticsDialog::StatisticsDialog(wxWindow* parent, MmappedTable* tablePtr, int
 
     wxArrayString labels;
     for (int i = 0; i < numCols; ++i) {
-        labels.Add(table->GetColLabelValue(i));
+        labels.Add(table->ColumnLabel(i));
     }
     autocomplete = std::make_unique<FormulaAutocomplete>(
         formulaCtrl, formulahint::BuildFormulaCandidates(labels));

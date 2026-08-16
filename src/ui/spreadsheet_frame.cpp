@@ -182,9 +182,23 @@ wxString DisplayNameForDir(const wxString& dir) {
     return name.IsEmpty() ? dir : name;
 }
 
+// Base directory where converted datasets are stored: the user's app-data area
+// (e.g. %APPDATA%\Gigasheet\datasets on Windows), created if missing. Keeping
+// them here rather than next to the source CSV avoids cluttering the user's
+// folders and works when the CSV lives on read-only or removable media.
+wxString DatasetsBaseDir() {
+    const wxString base =
+        wxStandardPaths::Get().GetUserDataDir() +
+        wxFileName::GetPathSeparator() + "datasets";
+    std::error_code ec;
+    std::filesystem::create_directories(base.ToStdString(), ec);
+    return base;
+}
+
 wxString MakeOutputDirectoryPath(const wxString& csvPath) {
     wxFileName fileName(csvPath);
-    wxString basePath = fileName.GetPathWithSep() + fileName.GetName() + "_gigasheet";
+    wxString basePath = DatasetsBaseDir() + wxFileName::GetPathSeparator() +
+                        fileName.GetName() + "_gigasheet";
     wxString candidate = basePath;
     int suffix = 1;
     while (wxDirExists(candidate)) {
@@ -229,28 +243,50 @@ std::string Sha256OfFile(const wxString& path) {
     }
 }
 
-// A converted dataset records the source file name + hash in "source.txt"
-// (line 1: original file name, line 2: sha256), so we can show the real title
-// and detect an already-converted source.
+// A converted dataset records its source in "source.txt":
+//   line 1: original file name (for the title bar)
+//   line 2: sha256 (to detect an already-converted source)
+//   line 3: absolute path of the original CSV (for writing edits back).
+// The dataset now lives under AppData rather than next to the CSV, so the full
+// source path must be recorded explicitly - it can't be derived from the dir.
 void WriteSourceInfo(const wxString& dir, const wxString& originalName,
-                     const std::string& sha) {
+                     const std::string& sha, const wxString& originalPath) {
     std::ofstream f((std::filesystem::path(dir.ToStdString()) / "source.txt"));
-    if (f) f << originalName.ToStdString() << "\n" << sha << "\n";
+    if (f) {
+        f << originalName.ToStdString() << "\n"
+          << sha << "\n"
+          << originalPath.ToStdString() << "\n";
+    }
 }
 
-struct SourceInfo { wxString name; std::string sha; bool ok = false; };
+struct SourceInfo { wxString name; std::string sha; wxString path; bool ok = false; };
 
 SourceInfo ReadSourceInfo(const wxString& dir) {
     SourceInfo info;
     std::ifstream f((std::filesystem::path(dir.ToStdString()) / "source.txt"));
     if (!f) return info;
-    std::string name, sha;
+    std::string name, sha, path;
     if (std::getline(f, name)) {
         info.name = wxString::FromUTF8(name);
         if (std::getline(f, sha)) info.sha = sha;
+        if (std::getline(f, path)) info.path = wxString::FromUTF8(path);
         info.ok = true;
     }
     return info;
+}
+
+// Absolute path of the original CSV a dataset was imported from, or "" if
+// unknown. Prefers the recorded path (line 3); for older datasets that predate
+// it, falls back to the dataset's own parent + recorded name.
+wxString OriginalCsvPathForDir(const wxString& dir) {
+    const SourceInfo info = ReadSourceInfo(dir);
+    if (info.ok && !info.path.IsEmpty()) return info.path;
+    if (info.ok && !info.name.IsEmpty()) {
+        wxFileName fn(dir, "");
+        fn.RemoveLastDir(); // dataset dir -> its parent
+        return fn.GetPath() + wxFileName::GetPathSeparator() + info.name;
+    }
+    return {};
 }
 
 // Display name for the title bar: prefer the original converted file name
@@ -267,7 +303,7 @@ wxString FindConvertedDir(const wxString& csvPath, const std::string& sha) {
     if (sha.empty()) return {};
     wxFileName fn(csvPath);
     const std::string base = (fn.GetName() + "_gigasheet").ToStdString();
-    const std::string parent = fn.GetPath().ToStdString();
+    const std::string parent = DatasetsBaseDir().ToStdString();
     std::error_code ec;
     for (auto it = std::filesystem::directory_iterator(parent, ec);
          !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
@@ -293,6 +329,10 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
         !dir.IsEmpty() && wxFileExists(dir + "/metadata.bin");
 
     sourceName = hasDataset ? OriginalNameForDir(dir) : wxString("Untitled");
+    if (hasDataset) {
+        datasetDir = dir;
+        originalCsvPath = OriginalCsvPathForDir(dir);
+    }
     SetBackgroundColour(kChromeBg);
     CreateStatusBar();
     SetStatusText(hasDataset ? "Loading..." : "No dataset open. Use Open to import a CSV.");
@@ -557,7 +597,7 @@ void SpreadsheetFrame::AutoSizeColumns(int sampleRows) {
 void SpreadsheetFrame::ShowCellInFormulaBar(int row, int col) {
     if (!table || row < 0 || col < 0) return;
     cellRefLabel->SetLabel(
-        wxString::Format("%s:%d", table->GetColLabelValue(col), row + 1));
+        wxString::Format("%s:%d", table->ColumnLabel(col), row + 1));
     formulaBar->ChangeValue(table->GetValue(row, col));
 }
 
@@ -628,28 +668,65 @@ void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
     { std::error_code ec; csvBytes = std::filesystem::file_size(csvPath.ToStdString(), ec); }
 
     try {
-        // Fingerprint the source so we can skip re-importing a file that has
-        // already been converted to our format.
+        // Start importing speculatively *while* we fingerprint the file, so a
+        // first-time open overlaps the import with the hash instead of running
+        // them back to back. If the hash then proves the file was already
+        // converted, we cancel the import and delete its partial output.
+        const wxString importDir = MakeOutputDirectoryPath(csvPath);
+        std::atomic<bool> cancelImport{false};
+        std::exception_ptr importError;
+        std::thread importThread([&] {
+            try {
+                ImportCsv(csvPath.ToStdString(), importDir.ToStdString(),
+                          &cancelImport);
+            } catch (const ImportCancelled&) {
+                // Expected: the file turned out to be already converted.
+            } catch (...) {
+                importError = std::current_exception();
+            }
+        });
+        // Ensure the worker is always stopped and joined, even if something
+        // below throws, so the std::thread never destructs while joinable.
+        struct Joiner {
+            std::thread& t; std::atomic<bool>& cancel;
+            ~Joiner() { if (t.joinable()) { cancel.store(true); t.join(); } }
+        } joiner{importThread, cancelImport};
+
         std::string sha;
         RunWithLoadingScreen(
             this, "Opening",
             wxString::Format("Checking %s (%s)", csvName, HumanSize(csvBytes)),
             [&] { sha = Sha256OfFile(csvPath); });
 
-        wxString outputDir = FindConvertedDir(csvPath, sha);
-        if (outputDir.IsEmpty()) {
-            outputDir = MakeOutputDirectoryPath(csvPath);
+        const wxString existing = FindConvertedDir(csvPath, sha);
+
+        wxString outputDir;
+        if (!existing.IsEmpty()) {
+            // Already converted: stop the speculative import and discard it.
+            cancelImport.store(true);
+            RunWithLoadingScreen(
+                this, "Opening",
+                wxString::Format("Opening %s (%s)", csvName, HumanSize(csvBytes)),
+                [&] {
+                    importThread.join();
+                    std::error_code ec;
+                    std::filesystem::remove_all(importDir.ToStdString(), ec);
+                });
+            outputDir = existing;
+            SetStatusText("Already converted - opening " + outputDir);
+        } else {
+            // Genuinely new file: wait for the (already running) import.
             RunWithLoadingScreen(
                 this, "Importing CSV",
                 wxString::Format("Importing %s (%s)", csvName, HumanSize(csvBytes)),
-                [&] {
-                    ImportCsv(
-                        csvPath.ToStdString(),
-                        outputDir.ToStdString());
-                });
-            WriteSourceInfo(outputDir, csvName, sha);
-        } else {
-            SetStatusText("Already converted - opening " + outputDir);
+                [&] { importThread.join(); });
+            if (importError) {
+                std::error_code ec;
+                std::filesystem::remove_all(importDir.ToStdString(), ec);
+                std::rethrow_exception(importError);
+            }
+            WriteSourceInfo(importDir, csvName, sha, csvPath);
+            outputDir = importDir;
         }
 
         auto* frame = new SpreadsheetFrame(outputDir);
@@ -685,8 +762,39 @@ bool SpreadsheetFrame::DoSave() {
         UpdateStatus();
         return false;
     }
+
+    // Mirror the edits back to the original CSV so the source file stays in
+    // sync with our internal format. Failure here isn't fatal - the edits are
+    // already committed to the dataset - but we tell the user.
+    bool csvWritten = false;
+    if (!originalCsvPath.IsEmpty()) {
+        std::string csvError;
+        csvWritten =
+            table->ExportBaseColumnsToCsv(originalCsvPath.ToStdString(), csvError);
+        if (!csvWritten) {
+            wxMessageBox(
+                "Cell edits were saved to the dataset, but writing them back to "
+                "the original CSV failed:\n" + csvError,
+                "CSV Write-Back Failed", wxICON_WARNING, this);
+        } else if (!datasetDir.IsEmpty()) {
+            // The CSV's contents (and hash) just changed. Refresh the recorded
+            // hash so reopening the edited file reuses this dataset instead of
+            // re-importing it.
+            const std::string newSha = Sha256OfFile(originalCsvPath);
+            if (!newSha.empty()) {
+                WriteSourceInfo(datasetDir, sourceName, newSha, originalCsvPath);
+            }
+        }
+    }
+
     UpdateStatus();
-    SetStatusText(wxString::Format("Saved %zu cell edit(s).", count));
+    if (csvWritten) {
+        SetStatusText(wxString::Format(
+            "Saved %zu cell edit(s) (dataset + %s).", count,
+            wxFileName(originalCsvPath).GetFullName()));
+    } else {
+        SetStatusText(wxString::Format("Saved %zu cell edit(s).", count));
+    }
     return true;
 }
 
@@ -921,7 +1029,7 @@ void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
 
     wxArrayString labels;
     for (int i = 0; i < table->GetNumberCols(); ++i) {
-        labels.Add(table->GetColLabelValue(i));
+        labels.Add(table->ColumnLabel(i));
     }
     FormulaAutocomplete autocomplete(
         formulaCtrl, formulahint::BuildFormulaCandidates(labels));
