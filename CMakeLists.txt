@@ -98,6 +98,9 @@ if(WIN32 OR MINGW OR MSYS OR CYGWIN)
         psapi
         dwmapi
     )
+    # Build as a GUI-subsystem app so launching the .exe doesn't spawn a
+    # console window alongside the window (adds -mwindows under MinGW).
+    set_target_properties(spreadsheet PROPERTIES WIN32_EXECUTABLE ON)
 endif()
 
 # ----------------------------------------------------------------------------- 
