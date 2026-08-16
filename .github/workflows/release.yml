@@ -41,6 +41,7 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-wxwidgets3.2-msw
             mingw-w64-x86_64-boost
+            mingw-w64-x86_64-ntldd
 
       - name: Resolve version
         id: ver
@@ -80,39 +81,45 @@ jobs:
       - name: Bundle runtime DLLs (recursive closure)
         shell: msys2 {0}
         run: |
-          set -euo pipefail
-          # Walk the full dependency closure so a clean Windows machine (no
-          # MSYS2 installed) has every DLL the exe transitively needs. ldd on
-          # each newly found DLL discovers indirect dependencies too.
-          declare -A seen
-          queue="$(ldd build/spreadsheet.exe | grep -i '/mingw64/bin/' | awk '{print $3}')"
-          while [ -n "$queue" ]; do
-            next=""
-            for dll in $queue; do
-              [ -z "$dll" ] && continue
-              if [ -z "${seen[$dll]:-}" ]; then
-                seen[$dll]=1
-                cp -n "$dll" release/ || true
-                deps="$(ldd "$dll" 2>/dev/null | grep -i '/mingw64/bin/' | awk '{print $3}')"
-                next="$next $deps"
-              fi
-            done
-            queue="$next"
-          done
-          echo "Bundled DLLs: $(ls -1 release/*.dll 2>/dev/null | wc -l)"
+          set -eu
+          # ntldd -R walks the full recursive PE dependency tree and prints the
+          # resolved path of every non-system DLL. This is the robust MSYS2 way
+          # to gather everything the exe needs so it runs on a clean Windows box.
+          # (grep is kept out of any pipefail path so a no-match never aborts.)
+          ntldd -R build/spreadsheet.exe \
+            | awk '{for (i=1;i<=NF;i++) if ($i=="=>") print $(i+1)}' \
+            | grep -iE 'mingw64|/mingw|msys64' \
+            | sort -u > dlls.txt || true
+
+          copied=0
+          while IFS= read -r dll; do
+            [ -z "$dll" ] && continue
+            if [ -f "$dll" ]; then
+              cp -f "$dll" release/
+              copied=$((copied+1))
+            fi
+          done < dlls.txt
+
+          echo "Bundled $copied DLLs:"
+          ls -1 release/*.dll 2>/dev/null || true
 
       - name: Verify bundle is self-contained
         shell: msys2 {0}
         run: |
-          set -euo pipefail
-          # Every non-system DLL the exe needs must now sit in release/. If ldd
-          # still resolves any dependency from /mingw64 (i.e. not shipped), fail
-          # so we never publish a bundle that breaks on a clean machine.
+          set -eu
+          # Re-resolve the exe from inside release/. Any dependency still
+          # pointing into the MSYS2 tree (rather than a DLL we shipped or a
+          # Windows system DLL) would be missing on a user's machine -> fail.
           cd release
-          missing="$(ldd spreadsheet.exe | grep -i '/mingw64/bin/' || true)"
-          if [ -n "$missing" ]; then
+          ntldd -R spreadsheet.exe \
+            | awk '{for (i=1;i<=NF;i++) if ($i=="=>") print $(i+1)}' \
+            | grep -iE 'mingw64|/mingw|msys64' \
+            | grep -viE '[/\\\\]release[/\\\\]' \
+            | sort -u > outside.txt || true
+
+          if [ -s outside.txt ]; then
             echo "::error::These DLLs resolve outside the bundle and would be missing on a clean machine:"
-            echo "$missing"
+            cat outside.txt
             exit 1
           fi
           echo "OK: exe resolves only bundled DLLs + Windows system DLLs."
