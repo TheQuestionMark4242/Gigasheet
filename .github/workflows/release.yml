@@ -70,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          cp build/spreadsheet.exe release/
+          cp build/gigasheet.exe release/
           # The app loads appicon.png from next to the exe at runtime.
           if [ -f build/appicon.png ]; then
             cp build/appicon.png release/
@@ -86,7 +86,7 @@ jobs:
           # resolved path of every non-system DLL. This is the robust MSYS2 way
           # to gather everything the exe needs so it runs on a clean Windows box.
           # (grep is kept out of any pipefail path so a no-match never aborts.)
-          ntldd -R build/spreadsheet.exe \
+          ntldd -R build/gigasheet.exe \
             | awk '{for (i=1;i<=NF;i++) if ($i=="=>") print $(i+1)}' \
             | grep -iE 'mingw64|/mingw|msys64' \
             | sort -u > dlls.txt || true
@@ -111,7 +111,7 @@ jobs:
           # pointing into the MSYS2 tree (rather than a DLL we shipped or a
           # Windows system DLL) would be missing on a user's machine -> fail.
           cd release
-          ntldd -R spreadsheet.exe \
+          ntldd -R gigasheet.exe \
             | awk '{for (i=1;i<=NF;i++) if ($i=="=>") print $(i+1)}' \
             | grep -iE 'mingw64|/mingw|msys64' \
             | grep -viE '[/\\\\]release[/\\\\]' \
@@ -131,16 +131,16 @@ jobs:
           Gigasheet (Windows build)
           =========================
 
-          To run: unzip this folder anywhere and double-click spreadsheet.exe.
+          To run: unzip this folder anywhere and double-click gigasheet.exe.
 
           Everything the app needs (the wxWidgets and MinGW runtime DLLs) is
           included in this folder, so no extra installation is required. Keep
-          spreadsheet.exe together with the .dll files and appicon.png.
+          gigasheet.exe together with the .dll files and appicon.png.
 
           Usage:
             - Open a CSV via the "Open" button to import a dataset, or pass a
               prepared dataset directory as the first argument:
-                  spreadsheet.exe path\to\dataset_dir
+                  gigasheet.exe path\to\dataset_dir
             - Use "Enable Filtering" then click a column header to filter rows.
             - "Add Column" adds derived columns from formulas; "Statistics"
               computes SUM/AVG/MIN/MAX/COUNT over a formula.

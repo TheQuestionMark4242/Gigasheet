@@ -56,6 +56,10 @@ add_executable(
     ${FLEX_ExprLexer_OUTPUTS}
 )
 
+# The CMake target stays "spreadsheet", but the produced binary is "gigasheet"
+# (gigasheet.exe on Windows).
+set_target_properties(spreadsheet PROPERTIES OUTPUT_NAME gigasheet)
+
 # Copy the application icon next to the executable so the app can load it at
 # runtime (window + taskbar icon).
 add_custom_command(TARGET spreadsheet POST_BUILD

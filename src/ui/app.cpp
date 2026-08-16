@@ -31,8 +31,9 @@ bool SpreadsheetApp::OnInit() {
 #ifdef __WXMSW__
     EnableDpiAwareness();
 #endif
-    wxString dir = ".";
-    if (argc > 1) dir = wxString(argv[1]);
+    // No argument: open an empty window (the user imports a CSV via "Open").
+    // An argument is treated as a prepared dataset directory to load.
+    wxString dir = (argc > 1) ? wxString(argv[1]) : wxString();
     SpreadsheetFrame* f = new SpreadsheetFrame(dir);
     f->Show(true);
     return true;

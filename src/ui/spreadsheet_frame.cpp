@@ -286,20 +286,37 @@ wxString FindConvertedDir(const wxString& csvPath, const std::string& sha) {
 
 SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     : wxFrame(nullptr, wxID_ANY, "Gigasheet", wxDefaultPosition, wxSize(1000,700)) {
-    sourceName = OriginalNameForDir(dir);
+    // A dataset directory must contain metadata.bin. When it doesn't (no
+    // argument given, or a bad path), open to an empty window instead of
+    // crashing; the user can then import a CSV with "Open".
+    const bool hasDataset =
+        !dir.IsEmpty() && wxFileExists(dir + "/metadata.bin");
+
+    sourceName = hasDataset ? OriginalNameForDir(dir) : wxString("Untitled");
     SetBackgroundColour(kChromeBg);
     CreateStatusBar();
-    SetStatusText("Loading...");
+    SetStatusText(hasDataset ? "Loading..." : "No dataset open. Use Open to import a CSV.");
 
     Bind(wxEVT_CLOSE_WINDOW, &SpreadsheetFrame::OnClose, this);
 
-    // Load the (possibly large) dataset behind a loading screen. mmap itself is
-    // lazy, but reading metadata and the chunk stats index can take a moment on
-    // big tables.
-    RunWithLoadingScreen(
-        this, "Loading",
-        wxString::Format("Loading %s (%s)", sourceName, HumanSize(DirDataSize(dir))),
-        [this, &dir] { table = new MmappedTable(dir.ToStdString()); });
+    if (hasDataset) {
+        // Load the (possibly large) dataset behind a loading screen. mmap itself
+        // is lazy, but reading metadata and the chunk stats index can take a
+        // moment on big tables. A load failure falls back to an empty table.
+        try {
+            RunWithLoadingScreen(
+                this, "Loading",
+                wxString::Format("Loading %s (%s)", sourceName, HumanSize(DirDataSize(dir))),
+                [this, &dir] { table = new MmappedTable(dir.ToStdString()); });
+        } catch (const std::exception& ex) {
+            wxMessageBox(wxString("Failed to open dataset:\n") + ex.what(),
+                         "Open Failed", wxICON_ERROR, this);
+            table = nullptr;
+        }
+    }
+    if (!table) {
+        table = new MmappedTable(); // empty: window opens, no data shown
+    }
 
     // Dark chrome: the action row + formula bar sit on one dark panel; the grid
     // canvas stays light. Regions read by tone, not by borders.
@@ -688,11 +705,19 @@ void SpreadsheetFrame::OnClose(wxCloseEvent& event) {
 }
 
 void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
+    if (table->GetNumberCols() == 0) {
+        SetStatusText("Open a dataset first (Open) before computing statistics.");
+        return;
+    }
     StatisticsDialog dlg(this, table, grid->GetGridCursorCol());
     dlg.ShowModal();
 }
 
 void SpreadsheetFrame::OnToggleFiltering() {
+    if (table->GetNumberCols() == 0 && !table->FilteringEnabled()) {
+        SetStatusText("Open a dataset first (Open) before filtering.");
+        return;
+    }
     const bool enable = !table->FilteringEnabled();
     table->SetFilteringEnabled(enable);
 
@@ -881,6 +906,10 @@ void SpreadsheetFrame::ShowColumnFilterPopup(int col) {
 }
 
 void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
+    if (table->GetNumberCols() == 0) {
+        SetStatusText("Open a dataset first (Open) before adding a derived column.");
+        return;
+    }
     wxDialog dlg(this, wxID_ANY, "Add Derived Column",
         wxDefaultPosition, wxDefaultSize,
         wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);

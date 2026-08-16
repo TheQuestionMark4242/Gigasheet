@@ -35,7 +35,13 @@ struct ColumnFilter {
 
 class MmappedTable : public wxGridTableBase {
 public:
-    /** 
+    /**
+     * An empty table (no columns, no rows). Used when the app is launched
+     * without a dataset so the window can still open.
+     */
+    MmappedTable() = default;
+
+    /**
      * Create a wxWidget data source from a memory mmapped file
      */
     MmappedTable(const std::string&);

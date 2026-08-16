@@ -11,7 +11,7 @@ Built in C++20 with [wxWidgets](https://www.wxwidgets.org/) for the UI.
 
 Grab the latest `gigasheet-windows-*.zip` from the
 [Releases](https://github.com/TheQuestionMark4242/Gigasheet/releases) page,
-unzip it anywhere, and double-click `spreadsheet.exe`. Everything it needs (the
+unzip it anywhere, and double-click `gigasheet.exe`. Everything it needs (the
 wxWidgets/MinGW runtime DLLs) is bundled — no install required.
 
 ## Features
