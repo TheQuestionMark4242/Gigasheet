@@ -8,13 +8,17 @@
 #include <limits>
 #include <fstream>
 #include <functional>
+#include <ostream>
+#include <streambuf>
 #include <string>
 #include <stdexcept>
 
 #include <wx/msgdlg.h>
 
+#include "../../third-party/csv-parser/csv.hpp"
 #include "../parser/expr_eval.hpp"
 #include "../parser/parser_driver.hpp"
+#include "../util/sha256.hpp"
 
 namespace fs = std::filesystem;
 
@@ -361,26 +365,36 @@ bool MmappedTable::SaveOverrides(std::string& errorOut) {
 }
 
 namespace {
-// Quote a CSV field per RFC 4180: wrap in double quotes and double any embedded
-// quote when the value contains a comma, quote, CR or LF; otherwise pass through.
-std::string CsvEscape(const std::string& s) {
-    const bool needsQuote =
-        s.find_first_of(",\"\r\n") != std::string::npos;
-    if (!needsQuote) return s;
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('"');
-    for (char c : s) {
-        if (c == '"') out.push_back('"');
-        out.push_back(c);
+// A streambuf that forwards everything written to `dest` while folding the same
+// bytes into a running SHA-256, so we can fingerprint the output during the one
+// write pass instead of re-reading the finished file.
+class Sha256TeeBuf : public std::streambuf {
+public:
+    explicit Sha256TeeBuf(std::streambuf* dest) : dest_(dest) {}
+    std::string hex() { return ctx_.hex(); }
+
+protected:
+    int_type overflow(int_type ch) override {
+        if (ch == traits_type::eof()) return ch;
+        const char c = static_cast<char>(ch);
+        ctx_.update(reinterpret_cast<const unsigned char*>(&c), 1);
+        return dest_->sputc(c);
     }
-    out.push_back('"');
-    return out;
-}
+    std::streamsize xsputn(const char* s, std::streamsize n) override {
+        ctx_.update(reinterpret_cast<const unsigned char*>(s),
+                    static_cast<std::size_t>(n));
+        return dest_->sputn(s, n);
+    }
+
+private:
+    std::streambuf* dest_;
+    sha256_detail::Ctx ctx_;
+};
 } // namespace
 
 bool MmappedTable::ExportBaseColumnsToCsv(const std::string& path,
-                                          std::string& errorOut) {
+                                          std::string& errorOut,
+                                          std::string* newShaOut) {
     errorOut.clear();
     if (numBaseCols == 0) return true; // nothing to write
 
@@ -389,48 +403,61 @@ bool MmappedTable::ExportBaseColumnsToCsv(const std::string& path,
         (target.filename().string() + ".gigasheet.tmp");
 
     {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) {
+        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+        if (!file) {
             errorOut = "Failed to open for writing: " + tmp.string();
             return false;
         }
 
-        // Header row: base column labels.
-        for (int col = 0; col < numBaseCols; ++col) {
-            if (col) out.put(',');
-            out << CsvEscape(columns[col].label);
-        }
-        out.put('\n');
+        // Tee the CSV writer's output through a SHA-256 accumulator.
+        Sha256TeeBuf tee(file.rdbuf());
+        std::ostream out(&tee);
 
+        // Vince's CSV writer handles RFC-4180 quoting. Crucially we disable
+        // auto-flush: by default it flushes the stream after *every* row, which
+        // makes writing a large file pathologically slow. With it off, output
+        // is batched (64 KB) and flushed in bulk.
+        auto writer = csv::make_csv_writer(out);
+        writer.set_auto_flush(false);
+
+        // Reused per-row buffer of field strings (fed to the writer as a range).
+        std::vector<std::string> record(static_cast<std::size_t>(numBaseCols));
+
+        // Header row: base column labels.
+        for (int col = 0; col < numBaseCols; ++col) record[col] = columns[col].label;
+        writer << record;
+
+        char numbuf[32];
         // One line per underlying row (full table, ignoring any active filter).
         for (int row = 0; row < rows; ++row) {
             for (int col = 0; col < numBaseCols; ++col) {
-                if (col) out.put(',');
                 const Column& c = columns[col];
                 if (c.type == ColumnType::INT32) {
-                    out << std::get<FnInt>(c.fn)(row);
+                    std::snprintf(numbuf, sizeof(numbuf), "%d",
+                                  std::get<FnInt>(c.fn)(row));
+                    record[col] = numbuf;
                 } else if (c.type == ColumnType::DOUBLE) {
                     // %.15g round-trips a double without gratuitous trailing
                     // zeros (whole values print as e.g. "3", not "3.000000").
-                    char buf[32];
-                    std::snprintf(buf, sizeof(buf), "%.15g",
+                    std::snprintf(numbuf, sizeof(numbuf), "%.15g",
                                   std::get<FnDbl>(c.fn)(row));
-                    out << buf;
+                    record[col] = numbuf;
                 } else { // CHARBUF
                     char_buf b = std::get<FnChar>(c.fn)(row);
                     b[63] = '\0';
-                    out << CsvEscape(std::string(b.data()));
+                    record[col].assign(b.data());
                 }
             }
-            out.put('\n');
+            writer << record;
         }
 
-        out.flush();
-        if (!out) {
+        writer.flush();
+        if (!file) {
             errorOut = "Write failed: " + tmp.string();
             std::error_code ec; fs::remove(tmp, ec);
             return false;
         }
+        if (newShaOut) *newShaOut = tee.hex();
     }
 
     std::error_code ec;

@@ -772,26 +772,32 @@ bool SpreadsheetFrame::DoSave() {
     }
 
     // Mirror the edits back to the original CSV so the source file stays in
-    // sync with our internal format. Failure here isn't fatal - the edits are
-    // already committed to the dataset - but we tell the user.
+    // sync with our internal format. This rewrites the whole file, so it runs on
+    // a background thread behind a loading screen (keeping the UI responsive on
+    // large tables). Failure here isn't fatal - the edits are already committed
+    // to the dataset - but we tell the user. The new file's hash is computed in
+    // the same write pass, so we don't re-read the file to refresh source.txt.
     bool csvWritten = false;
     if (!originalCsvPath.IsEmpty()) {
         std::string csvError;
-        csvWritten =
-            table->ExportBaseColumnsToCsv(originalCsvPath.ToStdString(), csvError);
+        std::string newSha;
+        RunWithLoadingScreen(
+            this, "Saving",
+            wxString::Format("Writing %s", wxFileName(originalCsvPath).GetFullName()),
+            [&] {
+                csvWritten = table->ExportBaseColumnsToCsv(
+                    originalCsvPath.ToStdString(), csvError, &newSha);
+            });
         if (!csvWritten) {
             wxMessageBox(
                 "Cell edits were saved to the dataset, but writing them back to "
                 "the original CSV failed:\n" + csvError,
                 "CSV Write-Back Failed", wxICON_WARNING, this);
-        } else if (!datasetDir.IsEmpty()) {
+        } else if (!datasetDir.IsEmpty() && !newSha.empty()) {
             // The CSV's contents (and hash) just changed. Refresh the recorded
             // hash so reopening the edited file reuses this dataset instead of
             // re-importing it.
-            const std::string newSha = Sha256OfFile(originalCsvPath);
-            if (!newSha.empty()) {
-                WriteSourceInfo(datasetDir, sourceName, newSha, originalCsvPath);
-            }
+            WriteSourceInfo(datasetDir, sourceName, newSha, originalCsvPath);
         }
     }
 

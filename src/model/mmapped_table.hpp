@@ -141,7 +141,12 @@ public:
     // saved edits are included. Derived columns are omitted (they aren't part of
     // the source file). Writes to a temp file and renames it into place; on
     // failure the original is left untouched and errorOut is set.
-    bool ExportBaseColumnsToCsv(const std::string& path, std::string& errorOut);
+    //
+    // Safe to call off the GUI thread (reads the mmap, touches no widgets). If
+    // newShaOut is non-null it receives the SHA-256 of the written file,
+    // computed during the single write pass so callers needn't re-read it.
+    bool ExportBaseColumnsToCsv(const std::string& path, std::string& errorOut,
+                                std::string* newShaOut = nullptr);
 
     // -------- wxGridTableBase overrides ----------
     int GetNumberRows() override;
