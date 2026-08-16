@@ -83,15 +83,18 @@ target_link_libraries(
     ${WX_LIBS}
 )
 
-# Windows-only target: psapi (memory usage) and dwmapi (dark title bar).
-# Linked unconditionally because the MSYS "Unix Makefiles" generator does not
-# set WIN32, which would otherwise skip these.
-target_link_libraries(
-    spreadsheet
-    PRIVATE
-    psapi
-    dwmapi
-)
+# Windows-only libs: psapi (memory usage) and dwmapi (dark title bar).
+# WIN32 covers the proper Windows CMake (CI); MINGW/MSYS cover the MSYS2
+# "Unix Makefiles" generator, which leaves WIN32 unset. On Linux none are set,
+# so these are correctly skipped (the code that uses them is __WXMSW__-guarded).
+if(WIN32 OR MINGW OR MSYS OR CYGWIN)
+    target_link_libraries(
+        spreadsheet
+        PRIVATE
+        psapi
+        dwmapi
+    )
+endif()
 
 # ----------------------------------------------------------------------------- 
 # Default to Release build if unspecified
