@@ -56,6 +56,13 @@ add_executable(
     ${FLEX_ExprLexer_OUTPUTS}
 )
 
+# Copy the application icon next to the executable so the app can load it at
+# runtime (window + taskbar icon).
+add_custom_command(TARGET spreadsheet POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/appicon.png
+        $<TARGET_FILE_DIR:spreadsheet>/appicon.png)
+
 target_include_directories(
     spreadsheet
     PRIVATE
@@ -76,13 +83,15 @@ target_link_libraries(
     ${WX_LIBS}
 )
 
-if(WIN32)
-    target_link_libraries(
-        spreadsheet
-        PRIVATE
-        psapi
-    )
-endif()
+# Windows-only target: psapi (memory usage) and dwmapi (dark title bar).
+# Linked unconditionally because the MSYS "Unix Makefiles" generator does not
+# set WIN32, which would otherwise skip these.
+target_link_libraries(
+    spreadsheet
+    PRIVATE
+    psapi
+    dwmapi
+)
 
 # ----------------------------------------------------------------------------- 
 # Default to Release build if unspecified

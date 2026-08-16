@@ -35,7 +35,7 @@ StatisticsDialog::StatisticsDialog(wxWindow* parent, MmappedTable* tablePtr, int
     computeBtn->Bind(wxEVT_BUTTON, &StatisticsDialog::OnCompute, this);
 
     auto* hint = new wxStaticText(this, wxID_ANY,
-        "e.g. =SUM(A1:A100) — type a letter for suggestions");
+        "e.g. =SUM(A1:A100)");
     resultText = new wxStaticText(this, wxID_ANY, "");
 
     auto* form = new wxFlexGridSizer(2, wxSize(8, 6));
