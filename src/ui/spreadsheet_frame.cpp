@@ -4,6 +4,31 @@
 #include <wx/filedlg.h>
 #include <wx/filename.h>
 #include <wx/stdpaths.h>
+#include <wx/progdlg.h>
+
+#include <wx/image.h>
+#include <wx/imagpng.h>
+#include <wx/iconbndl.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <fstream>
+#include <functional>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#ifdef __WXMSW__
+#include <dwmapi.h>
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#endif
 
 #include "spreadsheet_frame.hpp"
 #include "statistics_dialog.hpp"
@@ -14,6 +39,82 @@
 namespace {
 
 const int kStatisticsToolId = wxID_HIGHEST + 1;
+
+// Active palette. ApplyTheme() pushes these onto the widgets; ApplyPreset()
+// swaps in a named preset. Initialised to the default (Light) preset.
+wxColour kChromeBg;     // nav bar / formula panel
+wxColour kChromeText;   // text on nav bar / formula bar
+wxColour kChromeHover;  // button background on hover
+wxColour kInputBg;      // formula input field
+wxColour kCellBg;       // spreadsheet canvas
+wxColour kCellText;     // cell values
+wxColour kGridLine;     // gridlines
+wxColour kHeaderBg;     // grid row/column headers
+wxColour kHeaderText;   // header labels
+wxColour kSelBg;        // selection background
+wxColour kCellHighlight;// current-cell outline
+
+// A complete named colour scheme.
+struct Palette {
+    wxString name;
+    wxColour navBar, navText, navHover, formulaBar, cellBg, cellText,
+             gridLine, headerBg, headerText, selection, cellHighlight;
+};
+
+// Built-in appearance presets. The first entry is the shipped default.
+const std::vector<Palette>& Presets() {
+    static const std::vector<Palette> presets = {
+        // Light (default) - VS Code "Light+" inspired.
+        { "Light",
+          wxColour(0xF3,0xF3,0xF3), wxColour(0x1F,0x1F,0x1F), wxColour(0xE0,0xE0,0xE0),
+          wxColour(0xFF,0xFF,0xFF), wxColour(0xFF,0xFF,0xFF), wxColour(0x1F,0x1F,0x1F),
+          wxColour(0xE5,0xE5,0xE5), wxColour(0xEC,0xEC,0xEC), wxColour(0x33,0x33,0x33),
+          wxColour(0xAD,0xD6,0xFF), wxColour(0x00,0x7A,0xCC) },
+        // Dark - VS Code "Dark+" inspired, full-black cells.
+        { "Dark",
+          wxColour(0x25,0x25,0x26), wxColour(0xED,0xED,0xED), wxColour(0x2A,0x2D,0x2E),
+          wxColour(0x3C,0x3C,0x3C), wxColour(0x00,0x00,0x00), wxColour(0xFF,0xFF,0xFF),
+          wxColour(0x33,0x33,0x33), wxColour(0x2D,0x2D,0x2D), wxColour(0xED,0xED,0xED),
+          wxColour(0x26,0x4F,0x78), wxColour(0x00,0x7A,0xCC) },
+        // Sauravized Dark - midnight navy.
+        { "Sauravized Dark",
+          wxColour(0x0C,0x12,0x25), wxColour(0xD6,0xD9,0xDD), wxColour(0x39,0x3D,0x46),
+          wxColour(0x00,0x00,0x00), wxColour(0x08,0x08,0x08), wxColour(0xFD,0xFE,0xFF),
+          wxColour(0x2E,0x33,0x3B), wxColour(0x03,0x1D,0x4B), wxColour(0xFD,0xFE,0xFE),
+          wxColour(0x2E,0x3B,0x52), wxColour(0x0B,0x61,0xF5) },
+    };
+    return presets;
+}
+
+// Whether a preset's chrome is dark (drives the DWM dark title bar).
+bool PaletteIsDark(const Palette& p) {
+    return (p.navBar.Red() + p.navBar.Green() + p.navBar.Blue()) < 384; // <50% avg
+}
+
+// Copy a preset into the active palette globals.
+void SetActivePalette(const Palette& p) {
+    kChromeBg = p.navBar;         kChromeText = p.navText;
+    kChromeHover = p.navHover;    kInputBg = p.formulaBar;
+    kCellBg = p.cellBg;           kCellText = p.cellText;
+    kGridLine = p.gridLine;       kHeaderBg = p.headerBg;
+    kHeaderText = p.headerText;   kSelBg = p.selection;
+    kCellHighlight = p.cellHighlight;
+}
+
+#ifdef __WXMSW__
+// Ask DWM to paint this window's title bar light or dark (Win10 1809+/Win11).
+void SetTitleBarDark(wxWindow* win, bool dark) {
+    HWND hwnd = static_cast<HWND>(win->GetHWND());
+    BOOL flag = dark ? TRUE : FALSE;
+    // Attribute id is 20 on current builds, 19 on early Win10 20H1 and before.
+    if (DwmSetWindowAttribute(hwnd, 20, &flag, sizeof(flag)) != S_OK) {
+        DwmSetWindowAttribute(hwnd, 19, &flag, sizeof(flag));
+    }
+    // Nudge a non-client repaint so the change shows immediately.
+    ::SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+}
+#endif
 
 wxString FindCsvImporterPath() {
     wxFileName exeName(wxStandardPaths::Get().GetExecutablePath());
@@ -31,6 +132,50 @@ wxString FindCsvImporterPath() {
     return {};
 }
 
+// Runs `work` on a background thread while a pulsing progress dialog keeps the
+// GUI responsive, so heavy loads (large CSV imports, big datasets) show a
+// loading screen instead of a frozen window. Any exception thrown by `work` is
+// rethrown on the calling (GUI) thread once it finishes.
+void RunWithLoadingScreen(wxWindow* parent, const wxString& title,
+                          const wxString& message,
+                          std::function<void()> work) {
+    std::atomic<bool> done{false};
+    std::exception_ptr error;
+
+    std::thread worker([&] {
+        try {
+            work();
+        } catch (...) {
+            error = std::current_exception();
+        }
+        done.store(true);
+    });
+
+    wxProgressDialog dlg(title, message, /*maximum*/ 100, parent,
+                         wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_SMOOTH);
+    while (!done.load()) {
+        dlg.Pulse();
+        wxMilliSleep(80);
+        wxTheApp->Yield(true); // repaint the dialog, stay responsive
+    }
+    worker.join();
+
+    if (error) {
+        std::rethrow_exception(error);
+    }
+}
+
+// Last path component of a table directory, used as the window title.
+wxString DisplayNameForDir(const wxString& dir) {
+    wxFileName fn(dir);
+    wxString name = fn.GetFullName();
+    if (name.IsEmpty()) {
+        const wxArrayString dirs = fn.GetDirs();
+        if (!dirs.IsEmpty()) name = dirs.Last();
+    }
+    return name.IsEmpty() ? dir : name;
+}
+
 wxString MakeOutputDirectoryPath(const wxString& csvPath) {
     wxFileName fileName(csvPath);
     wxString basePath = fileName.GetPathWithSep() + fileName.GetName() + "_gigasheet";
@@ -45,31 +190,85 @@ wxString MakeOutputDirectoryPath(const wxString& csvPath) {
 } 
 
 SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
-    : wxFrame(nullptr, wxID_ANY, "Spreadsheet", wxDefaultPosition, wxSize(1000,700)) {
+    : wxFrame(nullptr, wxID_ANY, "Gigasheet", wxDefaultPosition, wxSize(1000,700)) {
+    sourceName = DisplayNameForDir(dir);
+    SetBackgroundColour(kChromeBg);
     CreateStatusBar();
     SetStatusText("Loading...");
-    
-    // toolbar
-    wxToolBar* toolbar = CreateToolBar();
-    toolbar->AddTool(wxID_OPEN, "Open CSV", wxArtProvider::GetBitmap(wxART_FILE_OPEN));
-    toolbar->AddTool(wxID_SAVE, "Save", wxArtProvider::GetBitmap(wxART_FILE_SAVE));
-    toolbar->AddTool(wxID_ADD, "Add Column", wxArtProvider::GetBitmap(wxART_PLUS));
-    toolbar->AddTool(kStatisticsToolId, "Statistics", wxArtProvider::GetBitmap(wxART_REPORT_VIEW));
-    toolbar->Realize();
 
-    Bind(wxEVT_TOOL, &SpreadsheetFrame::OnOpenCsv, this, wxID_OPEN);
-    Bind(wxEVT_TOOL, &SpreadsheetFrame::OnSave, this, wxID_SAVE);
-    Bind(wxEVT_TOOL, &SpreadsheetFrame::OnAddColumn, this, wxID_ADD);
-    Bind(wxEVT_TOOL, &SpreadsheetFrame::OnStatistics, this, kStatisticsToolId);
     Bind(wxEVT_CLOSE_WINDOW, &SpreadsheetFrame::OnClose, this);
+
+    // Load the (possibly large) dataset behind a loading screen. mmap itself is
+    // lazy, but reading metadata and the chunk stats index can take a moment on
+    // big tables.
+    RunWithLoadingScreen(
+        this, "Loading",
+        wxString::Format("Loading %s ...", sourceName),
+        [this, &dir] { table = new MmappedTable(dir.ToStdString()); });
+
+    // Dark chrome: the action row + formula bar sit on one dark panel; the grid
+    // canvas stays light. Regions read by tone, not by borders.
+    topBar = new wxPanel(this);
+    topBar->SetBackgroundColour(kChromeBg);
+    wxBoxSizer* topSizer = new wxBoxSizer(wxVERTICAL);
+
+    // Flat, dark "buttons" built from static text so we fully control colour and
+    // hover (native wxButton ignores background colour on Windows). Each is kept
+    // in navButtons so ApplyTheme() can recolour it live.
+    auto navButton = [&](const wxString& label, std::function<void()> onClick) {
+        auto* b = new wxStaticText(topBar, wxID_ANY, "  " + label + "  ",
+            wxDefaultPosition, wxDefaultSize, wxALIGN_CENTRE);
+        b->SetForegroundColour(kChromeText);
+        b->SetBackgroundColour(kChromeBg);
+        b->SetMinSize(wxSize(-1, FromDIP(24)));
+        b->SetCursor(wxCursor(wxCURSOR_HAND));
+        b->Bind(wxEVT_ENTER_WINDOW, [b](wxMouseEvent& e) {
+            b->SetBackgroundColour(kChromeHover); b->Refresh(); e.Skip(); });
+        b->Bind(wxEVT_LEAVE_WINDOW, [b](wxMouseEvent& e) {
+            b->SetBackgroundColour(kChromeBg); b->Refresh(); e.Skip(); });
+        b->Bind(wxEVT_LEFT_DOWN, [onClick](wxMouseEvent& e) {
+            onClick(); e.Skip(); });
+        navButtons.push_back(b);
+        return b;
+    };
+
+    wxBoxSizer* actions = new wxBoxSizer(wxHORIZONTAL);
+    actions->Add(navButton("Open",       [this]{ wxCommandEvent e; OnOpenCsv(e); }),    0, wxRIGHT, 4);
+    actions->Add(navButton("Save",       [this]{ wxCommandEvent e; OnSave(e); }),       0, wxRIGHT, 4);
+    actions->Add(navButton("Add Column", [this]{ wxCommandEvent e; OnAddColumn(e); }),  0, wxRIGHT, 4);
+    actions->Add(navButton("Statistics", [this]{ wxCommandEvent e; OnStatistics(e); }), 0, wxRIGHT, 4);
+    actions->Add(navButton("Appearance", [this]{ OnAppearance(); }), 0, wxRIGHT, 4);
+    topSizer->Add(actions, 0, wxLEFT | wxTOP, 8);
+
+    // formula bar: cell address + editable value field
+    cellRefLabel = new wxStaticText(topBar, wxID_ANY, wxEmptyString,
+        wxDefaultPosition, wxSize(90, -1),
+        wxALIGN_CENTRE_VERTICAL | wxST_NO_AUTORESIZE);
+    cellRefLabel->SetForegroundColour(kChromeText);
+    cellRefLabel->SetBackgroundColour(kChromeBg);
+    formulaBar = new wxTextCtrl(topBar, wxID_ANY, wxEmptyString,
+        wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+    formulaBar->SetBackgroundColour(kInputBg);
+    formulaBar->SetForegroundColour(kChromeText);
+    wxBoxSizer* formulaSizer = new wxBoxSizer(wxHORIZONTAL);
+    formulaSizer->Add(cellRefLabel, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
+    formulaSizer->Add(formulaBar, 1, wxALIGN_CENTRE_VERTICAL);
+    topSizer->Add(formulaSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 10);
+    topBar->SetSizer(topSizer);
 
     // grid
     grid = new wxGrid(this, wxID_ANY);
-    table = new MmappedTable(dir.ToStdString());
     grid->SetTable(table, true, wxGrid::wxGridSelectCells);
     grid->EnableEditing(true);
+    StyleGrid();
+
+    grid->Bind(wxEVT_GRID_SELECT_CELL, &SpreadsheetFrame::OnGridSelectCell, this);
+    formulaBar->Bind(wxEVT_TEXT_ENTER, &SpreadsheetFrame::OnFormulaEnter, this);
 
     UpdateStatus();
+    if (table->GetNumberRows() > 0 && table->GetNumberCols() > 0) {
+        ShowCellInFormulaBar(0, 0);
+    }
     memoryTimer.SetOwner(this);
 
     Bind(
@@ -80,8 +279,181 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     memoryTimer.Start(1000); // every second
 
     wxBoxSizer* s = new wxBoxSizer(wxVERTICAL);
+    s->Add(topBar, 0, wxEXPAND);
     s->Add(grid, 1, wxEXPAND);
     SetSizer(s);
+
+    // Appearance: pick a built-in preset. The last choice is remembered in a
+    // small file next to the exe; default to the first preset (Light).
+    wxFileName exeName(wxStandardPaths::Get().GetExecutablePath());
+    prefPath = exeName.GetPathWithSep() + "appearance.txt";
+    int startIndex = 0;
+    {
+        std::ifstream pf(prefPath.ToStdString());
+        std::string saved;
+        if (pf && std::getline(pf, saved)) {
+            const auto& presets = Presets();
+            for (size_t i = 0; i < presets.size(); ++i) {
+                if (presets[i].name == wxString(saved)) { startIndex = (int)i; break; }
+            }
+        }
+    }
+    ApplyPreset(startIndex);
+
+    // Size columns to their header + first rows so content isn't clipped.
+    AutoSizeColumns(10);
+
+    // Window / taskbar icon: appicon.png (GitHub avatar) shipped next to the exe.
+    if (!wxImage::FindHandler(wxBITMAP_TYPE_PNG)) {
+        wxImage::AddHandler(new wxPNGHandler());
+    }
+    const wxString iconPath = exeName.GetPathWithSep() + "appicon.png";
+    if (wxFileExists(iconPath)) {
+        wxImage img(iconPath, wxBITMAP_TYPE_PNG);
+        if (img.IsOk()) {
+            wxIconBundle icons;
+            for (int px : {16, 24, 32, 48, 64, 256}) {
+                wxBitmap bmp(img.Scale(px, px, wxIMAGE_QUALITY_HIGH));
+                wxIcon ic;
+                ic.CopyFromBitmap(bmp);
+                icons.AddIcon(ic);
+            }
+            SetIcons(icons);
+        }
+    }
+}
+
+// Flat, line-light grid styling: near-white gridlines, airy rows, and quiet
+// left-aligned headers instead of the default heavy 3D look.
+void SpreadsheetFrame::StyleGrid() {
+    // Black canvas, light values, softened gridlines.
+    grid->SetDefaultCellBackgroundColour(kCellBg);
+    grid->SetDefaultCellTextColour(kCellText);
+    grid->SetGridLineColour(kGridLine);
+    grid->GetGridWindow()->SetBackgroundColour(kCellBg); // area past the data
+
+    grid->SetDefaultRowSize(grid->FromDIP(24), true);
+    grid->SetColLabelSize(grid->FromDIP(28));
+    grid->SetRowLabelSize(grid->FromDIP(52));
+
+    // Dark, flat headers (row numbers + column labels) with muted, low-contrast
+    // text so the header/gridline seams read soft rather than stark white.
+    grid->SetLabelBackgroundColour(kHeaderBg);
+    grid->SetLabelTextColour(kHeaderText);
+    wxFont labelFont = grid->GetLabelFont();
+    labelFont.SetWeight(wxFONTWEIGHT_NORMAL);
+    grid->SetLabelFont(labelFont);
+    grid->SetColLabelAlignment(wxALIGN_CENTRE, wxALIGN_CENTRE);
+
+    // Soft selection + a thin current-cell outline (not the fat default box).
+    grid->SetSelectionBackground(kSelBg);
+    grid->SetSelectionForeground(kCellText);
+    grid->SetCellHighlightColour(kCellHighlight);
+    grid->SetCellHighlightPenWidth(1);
+
+    grid->DisableDragRowSize();
+}
+
+// Push the (possibly just-reloaded) palette globals onto every widget.
+void SpreadsheetFrame::ApplyTheme() {
+    SetBackgroundColour(kChromeBg);
+
+    topBar->SetBackgroundColour(kChromeBg);
+    for (wxStaticText* b : navButtons) {
+        b->SetForegroundColour(kChromeText);
+        b->SetBackgroundColour(kChromeBg);
+        b->Refresh();
+    }
+    cellRefLabel->SetForegroundColour(kChromeText);
+    cellRefLabel->SetBackgroundColour(kChromeBg);
+    formulaBar->SetBackgroundColour(kInputBg);
+    formulaBar->SetForegroundColour(kChromeText);
+
+    StyleGrid();
+
+    topBar->Refresh();
+    formulaBar->Refresh();
+    grid->ForceRefresh();
+}
+
+void SpreadsheetFrame::ApplyPreset(int index) {
+    const auto& presets = Presets();
+    if (index < 0 || index >= (int)presets.size()) index = 0;
+    const Palette& p = presets[index];
+
+    SetActivePalette(p);
+    currentThemeName = p.name;
+    ApplyTheme();
+
+#ifdef __WXMSW__
+    SetTitleBarDark(this, PaletteIsDark(p));
+#endif
+
+    // Remember the choice for next launch.
+    std::ofstream pf(prefPath.ToStdString(), std::ios::trunc);
+    if (pf) pf << p.name.ToStdString() << "\n";
+
+    SetStatusText("Appearance: " + p.name);
+}
+
+void SpreadsheetFrame::OnAppearance() {
+    const auto& presets = Presets();
+    wxMenu menu;
+    const int base = wxID_HIGHEST + 100;
+    for (size_t i = 0; i < presets.size(); ++i) {
+        wxMenuItem* item = menu.AppendRadioItem(base + (int)i, presets[i].name);
+        if (presets[i].name == currentThemeName) item->Check(true);
+    }
+    menu.Bind(wxEVT_MENU, [this, base](wxCommandEvent& e) {
+        ApplyPreset(e.GetId() - base);
+    });
+    PopupMenu(&menu);
+}
+
+void SpreadsheetFrame::AutoSizeColumns(int sampleRows) {
+    if (!grid || !table) return;
+    const int cols = table->GetNumberCols();
+    const int rows = std::min(sampleRows, table->GetNumberRows());
+    const int padding = grid->FromDIP(18); // left+right cell padding
+
+    wxClientDC dc(grid);
+    const wxFont cellFont  = grid->GetDefaultCellFont();
+    const wxFont labelFont = grid->GetLabelFont();
+
+    for (int c = 0; c < cols; ++c) {
+        dc.SetFont(labelFont);
+        int width = dc.GetTextExtent(table->GetColLabelValue(c)).GetWidth();
+
+        dc.SetFont(cellFont);
+        for (int r = 0; r < rows; ++r) {
+            const int w = dc.GetTextExtent(table->GetValue(r, c)).GetWidth();
+            if (w > width) width = w;
+        }
+        grid->SetColSize(c, width + padding);
+    }
+}
+
+void SpreadsheetFrame::ShowCellInFormulaBar(int row, int col) {
+    if (!table || row < 0 || col < 0) return;
+    cellRefLabel->SetLabel(
+        wxString::Format("%s:%d", table->GetColLabelValue(col), row + 1));
+    formulaBar->ChangeValue(table->GetValue(row, col));
+}
+
+void SpreadsheetFrame::OnGridSelectCell(wxGridEvent& event) {
+    ShowCellInFormulaBar(event.GetRow(), event.GetCol());
+    event.Skip();
+}
+
+void SpreadsheetFrame::OnFormulaEnter(wxCommandEvent&) {
+    const int row = grid->GetGridCursorRow();
+    const int col = grid->GetGridCursorCol();
+    if (row >= 0 && col >= 0) {
+        grid->SetCellValue(row, col, formulaBar->GetValue());
+        grid->ForceRefresh();
+        UpdateStatus();
+    }
+    grid->SetFocus();
 }
 
 void SpreadsheetFrame::OnTimer(wxTimerEvent&) {
@@ -100,7 +472,12 @@ void SpreadsheetFrame::UpdateStatus() {
         text += wxString::Format(" | Unsaved edits: %zu", unsaved);
     }
     SetStatusText(text);
-    SetTitle(unsaved > 0 ? "Spreadsheet *" : "Spreadsheet");
+    // Build the title without a narrow multibyte literal (the em dash was being
+    // mangled by the local charset); decode the separator as explicit UTF-8.
+    wxString title = sourceName;
+    if (unsaved > 0) title += " *";
+    title += wxString::FromUTF8(" \xE2\x80\x94 Gigasheet"); // " — Gigasheet"
+    SetTitle(title);
 }
 
 void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
@@ -120,11 +497,15 @@ void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
     const wxString outputDir = MakeOutputDirectoryPath(csvPath);
 
     try {
-        wxBusyCursor busy;
-
-        ImportCsv(
-            csvPath.ToStdString(),
-            outputDir.ToStdString());
+        RunWithLoadingScreen(
+            this, "Importing CSV",
+            wxString::Format("Importing %s ...\nThis can take a while for large files.",
+                             wxFileName(csvPath).GetFullName()),
+            [&] {
+                ImportCsv(
+                    csvPath.ToStdString(),
+                    outputDir.ToStdString());
+            });
 
         auto* frame = new SpreadsheetFrame(outputDir);
         frame->Show(true);
@@ -191,7 +572,7 @@ void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
     auto* formulaCtrl = new wxTextCtrl(&dlg, wxID_ANY, "=",
         wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
     auto* hint = new wxStaticText(&dlg, wxID_ANY,
-        "e.g. =A + B*2 or =CONCATENATE(Name, ' - ', A) — type a letter for suggestions");
+        "e.g. =A + B*2 or =CONCATENATE(Name, ' - ', A)");
 
     wxArrayString labels;
     for (int i = 0; i < table->GetNumberCols(); ++i) {

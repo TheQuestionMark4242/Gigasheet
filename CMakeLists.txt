@@ -56,6 +56,13 @@ add_executable(
     ${FLEX_ExprLexer_OUTPUTS}
 )
 
+# Copy the application icon next to the executable so the app can load it at
+# runtime (window + taskbar icon).
+add_custom_command(TARGET spreadsheet POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/appicon.png
+        $<TARGET_FILE_DIR:spreadsheet>/appicon.png)
+
 target_include_directories(
     spreadsheet
     PRIVATE
@@ -76,11 +83,16 @@ target_link_libraries(
     ${WX_LIBS}
 )
 
-if(WIN32)
+# Windows-only libs: psapi (memory usage) and dwmapi (dark title bar).
+# WIN32 covers the proper Windows CMake (CI); MINGW/MSYS cover the MSYS2
+# "Unix Makefiles" generator, which leaves WIN32 unset. On Linux none are set,
+# so these are correctly skipped (the code that uses them is __WXMSW__-guarded).
+if(WIN32 OR MINGW OR MSYS OR CYGWIN)
     target_link_libraries(
         spreadsheet
         PRIVATE
         psapi
+        dwmapi
     )
 endif()
 
