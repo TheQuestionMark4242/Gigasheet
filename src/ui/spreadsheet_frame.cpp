@@ -30,8 +30,13 @@
 #endif
 #endif
 
+#include <filesystem>
+
+#include "mio/mmap.hpp"
+
 #include "spreadsheet_frame.hpp"
 #include "statistics_dialog.hpp"
+#include "../util/sha256.hpp"
 #include "formula_autocomplete.hpp"
 #include "../storage/csv_importer.hpp"
 #include "../storage/memory_usage.hpp"
@@ -187,11 +192,100 @@ wxString MakeOutputDirectoryPath(const wxString& csvPath) {
     return candidate;
 }
 
-} 
+// Human-readable byte count, e.g. "271.9 MB".
+wxString HumanSize(std::uint64_t bytes) {
+    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    double v = static_cast<double>(bytes);
+    int u = 0;
+    while (v >= 1024.0 && u < 4) { v /= 1024.0; ++u; }
+    return (u == 0) ? wxString::Format("%llu %s", (unsigned long long)bytes, units[0])
+                    : wxString::Format("%.1f %s", v, units[u]);
+}
+
+// Total size of a converted dataset directory (its column/*.bin files etc.).
+std::uint64_t DirDataSize(const wxString& dir) {
+    std::uint64_t total = 0;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(dir.ToStdString(), ec);
+         !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (it->is_regular_file(ec)) total += it->file_size(ec);
+    }
+    return total;
+}
+
+// SHA-256 of a file's contents (memory-mapped). Empty string on failure.
+std::string Sha256OfFile(const wxString& path) {
+    try {
+        std::error_code ec;
+        const auto sz = std::filesystem::file_size(path.ToStdString(), ec);
+        if (ec) return {};
+        if (sz == 0) return sha256_hex("", 0);
+        mio::mmap_source mm(path.ToStdString());
+        if (!mm.is_open()) return {};
+        return sha256_hex(mm.data(), mm.size());
+    } catch (...) {
+        return {};
+    }
+}
+
+// A converted dataset records the source file name + hash in "source.txt"
+// (line 1: original file name, line 2: sha256), so we can show the real title
+// and detect an already-converted source.
+void WriteSourceInfo(const wxString& dir, const wxString& originalName,
+                     const std::string& sha) {
+    std::ofstream f((std::filesystem::path(dir.ToStdString()) / "source.txt"));
+    if (f) f << originalName.ToStdString() << "\n" << sha << "\n";
+}
+
+struct SourceInfo { wxString name; std::string sha; bool ok = false; };
+
+SourceInfo ReadSourceInfo(const wxString& dir) {
+    SourceInfo info;
+    std::ifstream f((std::filesystem::path(dir.ToStdString()) / "source.txt"));
+    if (!f) return info;
+    std::string name, sha;
+    if (std::getline(f, name)) {
+        info.name = wxString::FromUTF8(name);
+        if (std::getline(f, sha)) info.sha = sha;
+        info.ok = true;
+    }
+    return info;
+}
+
+// Display name for the title bar: prefer the original converted file name
+// (from source.txt), falling back to the directory's own name.
+wxString OriginalNameForDir(const wxString& dir) {
+    const SourceInfo info = ReadSourceInfo(dir);
+    if (info.ok && !info.name.IsEmpty()) return info.name;
+    return DisplayNameForDir(dir);
+}
+
+// Look for an existing converted directory whose recorded source hash matches
+// `sha` (i.e. this exact file was already imported). Returns "" if none.
+wxString FindConvertedDir(const wxString& csvPath, const std::string& sha) {
+    if (sha.empty()) return {};
+    wxFileName fn(csvPath);
+    const std::string base = (fn.GetName() + "_gigasheet").ToStdString();
+    const std::string parent = fn.GetPath().ToStdString();
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(parent, ec);
+         !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const std::string name = it->path().filename().string();
+        if (name.rfind(base, 0) != 0) continue; // must start with "<name>_gigasheet"
+        const wxString cand(it->path().string());
+        if (!wxFileExists(cand + "/metadata.bin")) continue;
+        const SourceInfo info = ReadSourceInfo(cand);
+        if (info.ok && info.sha == sha) return cand;
+    }
+    return {};
+}
+
+}
 
 SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     : wxFrame(nullptr, wxID_ANY, "Gigasheet", wxDefaultPosition, wxSize(1000,700)) {
-    sourceName = DisplayNameForDir(dir);
+    sourceName = OriginalNameForDir(dir);
     SetBackgroundColour(kChromeBg);
     CreateStatusBar();
     SetStatusText("Loading...");
@@ -203,7 +297,7 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     // big tables.
     RunWithLoadingScreen(
         this, "Loading",
-        wxString::Format("Loading %s ...", sourceName),
+        wxString::Format("Loading %s (%s)", sourceName, HumanSize(DirDataSize(dir))),
         [this, &dir] { table = new MmappedTable(dir.ToStdString()); });
 
     // Dark chrome: the action row + formula bar sit on one dark panel; the grid
@@ -494,18 +588,34 @@ void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
     }
 
     const wxString csvPath = dlg.GetPath();
-    const wxString outputDir = MakeOutputDirectoryPath(csvPath);
+    const wxString csvName = wxFileName(csvPath).GetFullName();
+    std::uint64_t csvBytes = 0;
+    { std::error_code ec; csvBytes = std::filesystem::file_size(csvPath.ToStdString(), ec); }
 
     try {
+        // Fingerprint the source so we can skip re-importing a file that has
+        // already been converted to our format.
+        std::string sha;
         RunWithLoadingScreen(
-            this, "Importing CSV",
-            wxString::Format("Importing %s ...\nThis can take a while for large files.",
-                             wxFileName(csvPath).GetFullName()),
-            [&] {
-                ImportCsv(
-                    csvPath.ToStdString(),
-                    outputDir.ToStdString());
-            });
+            this, "Opening",
+            wxString::Format("Checking %s (%s)", csvName, HumanSize(csvBytes)),
+            [&] { sha = Sha256OfFile(csvPath); });
+
+        wxString outputDir = FindConvertedDir(csvPath, sha);
+        if (outputDir.IsEmpty()) {
+            outputDir = MakeOutputDirectoryPath(csvPath);
+            RunWithLoadingScreen(
+                this, "Importing CSV",
+                wxString::Format("Importing %s (%s)", csvName, HumanSize(csvBytes)),
+                [&] {
+                    ImportCsv(
+                        csvPath.ToStdString(),
+                        outputDir.ToStdString());
+                });
+            WriteSourceInfo(outputDir, csvName, sha);
+        } else {
+            SetStatusText("Already converted - opening " + outputDir);
+        }
 
         auto* frame = new SpreadsheetFrame(outputDir);
         frame->Show(true);
