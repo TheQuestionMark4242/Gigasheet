@@ -147,12 +147,12 @@ public:
     // re-serialized from the columnar store).
     //
     // Safe to call off the GUI thread (reads the mmap, touches no widgets). If
-    // newShaOut is non-null it receives the SHA-256 of the written file,
+    // newCrcOut is non-null it receives the CRC-32 of the written file,
     // computed during the write pass so callers needn't re-read it.
     bool ExportBaseColumnsToCsv(const std::string& path,
                                 const std::vector<int>& editedRows,
                                 std::string& errorOut,
-                                std::string* newShaOut = nullptr);
+                                std::string* newCrcOut = nullptr);
 
     // Underlying row indices with a pending (unsaved) edit in any base column,
     // sorted and de-duplicated. Capture this before SaveOverrides clears the

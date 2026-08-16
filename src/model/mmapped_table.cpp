@@ -18,7 +18,7 @@
 
 #include "../parser/expr_eval.hpp"
 #include "../parser/parser_driver.hpp"
-#include "../util/sha256.hpp"
+#include "../util/crc32.hpp"
 
 namespace fs = std::filesystem;
 
@@ -366,29 +366,28 @@ bool MmappedTable::SaveOverrides(std::string& errorOut) {
 
 namespace {
 // A streambuf that forwards everything written to `dest` while folding the same
-// bytes into a running SHA-256, so we can fingerprint the output during the one
+// bytes into a running CRC-32, so we can fingerprint the output during the one
 // write pass instead of re-reading the finished file.
-class Sha256TeeBuf : public std::streambuf {
+class Crc32TeeBuf : public std::streambuf {
 public:
-    explicit Sha256TeeBuf(std::streambuf* dest) : dest_(dest) {}
+    explicit Crc32TeeBuf(std::streambuf* dest) : dest_(dest) {}
     std::string hex() { return ctx_.hex(); }
 
 protected:
     int_type overflow(int_type ch) override {
         if (ch == traits_type::eof()) return ch;
         const char c = static_cast<char>(ch);
-        ctx_.update(reinterpret_cast<const unsigned char*>(&c), 1);
+        ctx_.update(&c, 1);
         return dest_->sputc(c);
     }
     std::streamsize xsputn(const char* s, std::streamsize n) override {
-        ctx_.update(reinterpret_cast<const unsigned char*>(s),
-                    static_cast<std::size_t>(n));
+        ctx_.update(s, static_cast<std::size_t>(n));
         return dest_->sputn(s, n);
     }
 
 private:
     std::streambuf* dest_;
-    sha256_detail::Ctx ctx_;
+    crc32_detail::Ctx ctx_;
 };
 
 // Append `s` to `out` as one CSV field, RFC-4180 quoted only when needed
@@ -466,7 +465,7 @@ std::vector<int> MmappedTable::PendingEditedRows() const {
 bool MmappedTable::ExportBaseColumnsToCsv(const std::string& path,
                                           const std::vector<int>& editedRows,
                                           std::string& errorOut,
-                                          std::string* newShaOut) {
+                                          std::string* newCrcOut) {
     errorOut.clear();
     if (numBaseCols == 0) return true; // nothing to write
 
@@ -498,7 +497,7 @@ bool MmappedTable::ExportBaseColumnsToCsv(const std::string& path,
             return false;
         }
         // Fingerprint the output as we write it (single pass, no re-read).
-        Sha256TeeBuf tee(file.rdbuf());
+        Crc32TeeBuf tee(file.rdbuf());
         std::ostream out(&tee);
 
         if (canSplice) {
@@ -560,7 +559,7 @@ bool MmappedTable::ExportBaseColumnsToCsv(const std::string& path,
             std::error_code ec; fs::remove(tmp, ec);
             return false;
         }
-        if (newShaOut) *newShaOut = tee.hex();
+        if (newCrcOut) *newCrcOut = tee.hex();
     }
 
     // Release the mapping before replacing the file: Windows won't let a

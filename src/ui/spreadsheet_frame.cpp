@@ -37,7 +37,7 @@
 
 #include "spreadsheet_frame.hpp"
 #include "statistics_dialog.hpp"
-#include "../util/sha256.hpp"
+#include "../util/crc32.hpp"
 #include "formula_autocomplete.hpp"
 #include "../storage/csv_importer.hpp"
 #include "../storage/memory_usage.hpp"
@@ -228,48 +228,85 @@ std::uint64_t DirDataSize(const wxString& dir) {
     return total;
 }
 
-// SHA-256 of a file's contents (memory-mapped). Empty string on failure.
-std::string Sha256OfFile(const wxString& path) {
+// CRC-32 of a file's contents (memory-mapped). Empty string on failure. A
+// fast, non-cryptographic checksum is all we need here - this is a cache/dedup
+// check, not a security check.
+std::string Crc32OfFile(const wxString& path) {
     try {
         std::error_code ec;
         const auto sz = std::filesystem::file_size(path.ToStdString(), ec);
         if (ec) return {};
-        if (sz == 0) return sha256_hex("", 0);
+        if (sz == 0) return crc32_hex("", 0);
         mio::mmap_source mm(path.ToStdString());
         if (!mm.is_open()) return {};
-        return sha256_hex(mm.data(), mm.size());
+        return crc32_hex(mm.data(), mm.size());
     } catch (...) {
         return {};
     }
 }
 
+// Size + last-modified time of a file, used as a near-free change signal that
+// avoids reading the file at all when it hasn't changed.
+struct FileStat { std::uint64_t size = 0; long long mtime = 0; bool ok = false; };
+
+FileStat StatFile(const wxString& path) {
+    FileStat s;
+    std::error_code ec;
+    const auto sz = std::filesystem::file_size(path.ToStdString(), ec);
+    if (ec) return s;
+    const auto t = std::filesystem::last_write_time(path.ToStdString(), ec);
+    if (ec) return s;
+    s.size = sz;
+    s.mtime = static_cast<long long>(t.time_since_epoch().count());
+    s.ok = true;
+    return s;
+}
+
 // A converted dataset records its source in "source.txt":
 //   line 1: original file name (for the title bar)
-//   line 2: sha256 (to detect an already-converted source)
-//   line 3: absolute path of the original CSV (for writing edits back).
+//   line 2: CRC-32 of the source (content check when size/mtime don't match)
+//   line 3: absolute path of the original CSV (for writing edits back)
+//   line 4: source size in bytes   } filesystem fast-path: if both match the
+//   line 5: source mtime (rep count)} current file, reuse it without reading
 // The dataset now lives under AppData rather than next to the CSV, so the full
 // source path must be recorded explicitly - it can't be derived from the dir.
 void WriteSourceInfo(const wxString& dir, const wxString& originalName,
-                     const std::string& sha, const wxString& originalPath) {
+                     const std::string& crc, const wxString& originalPath,
+                     std::uint64_t size, long long mtime) {
     std::ofstream f((std::filesystem::path(dir.ToStdString()) / "source.txt"));
     if (f) {
         f << originalName.ToStdString() << "\n"
-          << sha << "\n"
-          << originalPath.ToStdString() << "\n";
+          << crc << "\n"
+          << originalPath.ToStdString() << "\n"
+          << size << "\n"
+          << mtime << "\n";
     }
 }
 
-struct SourceInfo { wxString name; std::string sha; wxString path; bool ok = false; };
+struct SourceInfo {
+    wxString name;
+    std::string crc;
+    wxString path;
+    std::uint64_t size = 0;
+    long long mtime = 0;
+    bool ok = false;
+};
 
 SourceInfo ReadSourceInfo(const wxString& dir) {
     SourceInfo info;
     std::ifstream f((std::filesystem::path(dir.ToStdString()) / "source.txt"));
     if (!f) return info;
-    std::string name, sha, path;
+    std::string name, crc, path, size, mtime;
     if (std::getline(f, name)) {
         info.name = wxString::FromUTF8(name);
-        if (std::getline(f, sha)) info.sha = sha;
+        if (std::getline(f, crc)) info.crc = crc;
         if (std::getline(f, path)) info.path = wxString::FromUTF8(path);
+        try {
+            if (std::getline(f, size) && !size.empty())
+                info.size = std::stoull(size);
+            if (std::getline(f, mtime) && !mtime.empty())
+                info.mtime = std::stoll(mtime);
+        } catch (...) { /* old 3-line file: leave size/mtime at 0 */ }
         info.ok = true;
     }
     return info;
@@ -297,10 +334,10 @@ wxString OriginalNameForDir(const wxString& dir) {
     return DisplayNameForDir(dir);
 }
 
-// Look for an existing converted directory whose recorded source hash matches
-// `sha` (i.e. this exact file was already imported). Returns "" if none.
-wxString FindConvertedDir(const wxString& csvPath, const std::string& sha) {
-    if (sha.empty()) return {};
+// Scan the converted datasets derived from `csvPath`'s file name for the first
+// whose recorded source info satisfies `match`. Returns "" if none.
+wxString FindConvertedDirIf(const wxString& csvPath,
+                            const std::function<bool(const SourceInfo&)>& match) {
     wxFileName fn(csvPath);
     const std::string base = (fn.GetName() + "_gigasheet").ToStdString();
     const std::string parent = DatasetsBaseDir().ToStdString();
@@ -313,9 +350,26 @@ wxString FindConvertedDir(const wxString& csvPath, const std::string& sha) {
         const wxString cand(it->path().string());
         if (!wxFileExists(cand + "/metadata.bin")) continue;
         const SourceInfo info = ReadSourceInfo(cand);
-        if (info.ok && info.sha == sha) return cand;
+        if (info.ok && match(info)) return cand;
     }
     return {};
+}
+
+// Fast path: a dataset whose recorded size + mtime match the file exactly (the
+// file hasn't changed since import), so we can reuse it without reading it.
+wxString FindConvertedDirByStat(const wxString& csvPath, const FileStat& st) {
+    if (!st.ok) return {};
+    return FindConvertedDirIf(csvPath, [&](const SourceInfo& info) {
+        return info.size == st.size && info.mtime == st.mtime;
+    });
+}
+
+// Content check: a dataset whose recorded CRC-32 matches this file's contents.
+wxString FindConvertedDirByCrc(const wxString& csvPath, const std::string& crc) {
+    if (crc.empty()) return {};
+    return FindConvertedDirIf(csvPath, [&](const SourceInfo& info) {
+        return info.crc == crc;
+    });
 }
 
 }
@@ -668,65 +722,75 @@ void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
     { std::error_code ec; csvBytes = std::filesystem::file_size(csvPath.ToStdString(), ec); }
 
     try {
-        // Start importing speculatively *while* we fingerprint the file, so a
-        // first-time open overlaps the import with the hash instead of running
-        // them back to back. If the hash then proves the file was already
-        // converted, we cancel the import and delete its partial output.
-        const wxString importDir = MakeOutputDirectoryPath(csvPath);
-        std::atomic<bool> cancelImport{false};
-        std::exception_ptr importError;
-        std::thread importThread([&] {
-            try {
-                ImportCsv(csvPath.ToStdString(), importDir.ToStdString(),
-                          &cancelImport);
-            } catch (const ImportCancelled&) {
-                // Expected: the file turned out to be already converted.
-            } catch (...) {
-                importError = std::current_exception();
-            }
-        });
-        // Ensure the worker is always stopped and joined, even if something
-        // below throws, so the std::thread never destructs while joinable.
-        struct Joiner {
-            std::thread& t; std::atomic<bool>& cancel;
-            ~Joiner() { if (t.joinable()) { cancel.store(true); t.join(); } }
-        } joiner{importThread, cancelImport};
+        const FileStat stat = StatFile(csvPath);
 
-        std::string sha;
-        RunWithLoadingScreen(
-            this, "Opening",
-            wxString::Format("Checking %s (%s)", csvName, HumanSize(csvBytes)),
-            [&] { sha = Sha256OfFile(csvPath); });
+        // Fast path: a dataset whose recorded size + mtime match this file
+        // exactly - it hasn't changed since import, so reuse it without reading
+        // the file or importing anything.
+        wxString outputDir = FindConvertedDirByStat(csvPath, stat);
 
-        const wxString existing = FindConvertedDir(csvPath, sha);
-
-        wxString outputDir;
-        if (!existing.IsEmpty()) {
-            // Already converted: stop the speculative import and discard it.
-            cancelImport.store(true);
-            RunWithLoadingScreen(
-                this, "Opening",
-                wxString::Format("Opening %s (%s)", csvName, HumanSize(csvBytes)),
-                [&] {
-                    importThread.join();
-                    std::error_code ec;
-                    std::filesystem::remove_all(importDir.ToStdString(), ec);
-                });
-            outputDir = existing;
+        if (!outputDir.IsEmpty()) {
             SetStatusText("Already converted - opening " + outputDir);
         } else {
-            // Genuinely new file: wait for the (already running) import.
+            // Size/mtime didn't identify it. Import speculatively *while* we
+            // CRC the file, so a first-time open overlaps the import with the
+            // checksum. If the CRC then matches an existing dataset (e.g. the
+            // file was copied/touched), cancel the import and reuse it.
+            const wxString importDir = MakeOutputDirectoryPath(csvPath);
+            std::atomic<bool> cancelImport{false};
+            std::exception_ptr importError;
+            std::thread importThread([&] {
+                try {
+                    ImportCsv(csvPath.ToStdString(), importDir.ToStdString(),
+                              &cancelImport);
+                } catch (const ImportCancelled&) {
+                    // Expected: the file turned out to be already converted.
+                } catch (...) {
+                    importError = std::current_exception();
+                }
+            });
+            // Ensure the worker is always stopped and joined, even if something
+            // below throws, so the std::thread never destructs while joinable.
+            struct Joiner {
+                std::thread& t; std::atomic<bool>& cancel;
+                ~Joiner() { if (t.joinable()) { cancel.store(true); t.join(); } }
+            } joiner{importThread, cancelImport};
+
+            std::string crc;
             RunWithLoadingScreen(
-                this, "Importing CSV",
-                wxString::Format("Importing %s (%s)", csvName, HumanSize(csvBytes)),
-                [&] { importThread.join(); });
-            if (importError) {
-                std::error_code ec;
-                std::filesystem::remove_all(importDir.ToStdString(), ec);
-                std::rethrow_exception(importError);
+                this, "Opening",
+                wxString::Format("Checking %s (%s)", csvName, HumanSize(csvBytes)),
+                [&] { crc = Crc32OfFile(csvPath); });
+
+            const wxString existing = FindConvertedDirByCrc(csvPath, crc);
+            if (!existing.IsEmpty()) {
+                // Already converted: stop the speculative import and discard it.
+                cancelImport.store(true);
+                RunWithLoadingScreen(
+                    this, "Opening",
+                    wxString::Format("Opening %s (%s)", csvName, HumanSize(csvBytes)),
+                    [&] {
+                        importThread.join();
+                        std::error_code ec;
+                        std::filesystem::remove_all(importDir.ToStdString(), ec);
+                    });
+                outputDir = existing;
+                SetStatusText("Already converted - opening " + outputDir);
+            } else {
+                // Genuinely new file: wait for the (already running) import.
+                RunWithLoadingScreen(
+                    this, "Importing CSV",
+                    wxString::Format("Importing %s (%s)", csvName, HumanSize(csvBytes)),
+                    [&] { importThread.join(); });
+                if (importError) {
+                    std::error_code ec;
+                    std::filesystem::remove_all(importDir.ToStdString(), ec);
+                    std::rethrow_exception(importError);
+                }
+                WriteSourceInfo(importDir, csvName, crc, csvPath,
+                                stat.size, stat.mtime);
+                outputDir = importDir;
             }
-            WriteSourceInfo(importDir, csvName, sha, csvPath);
-            outputDir = importDir;
         }
 
         auto* frame = new SpreadsheetFrame(outputDir);
@@ -779,29 +843,31 @@ bool SpreadsheetFrame::DoSave() {
     // sync with our internal format. This rewrites the whole file, so it runs on
     // a background thread behind a loading screen (keeping the UI responsive on
     // large tables). Failure here isn't fatal - the edits are already committed
-    // to the dataset - but we tell the user. The new file's hash is computed in
+    // to the dataset - but we tell the user. The new file's CRC is computed in
     // the same write pass, so we don't re-read the file to refresh source.txt.
     bool csvWritten = false;
     if (!originalCsvPath.IsEmpty()) {
         std::string csvError;
-        std::string newSha;
+        std::string newCrc;
         RunWithLoadingScreen(
             this, "Saving",
             wxString::Format("Writing %s", wxFileName(originalCsvPath).GetFullName()),
             [&] {
                 csvWritten = table->ExportBaseColumnsToCsv(
-                    originalCsvPath.ToStdString(), editedRows, csvError, &newSha);
+                    originalCsvPath.ToStdString(), editedRows, csvError, &newCrc);
             });
         if (!csvWritten) {
             wxMessageBox(
                 "Cell edits were saved to the dataset, but writing them back to "
                 "the original CSV failed:\n" + csvError,
                 "CSV Write-Back Failed", wxICON_WARNING, this);
-        } else if (!datasetDir.IsEmpty() && !newSha.empty()) {
-            // The CSV's contents (and hash) just changed. Refresh the recorded
-            // hash so reopening the edited file reuses this dataset instead of
-            // re-importing it.
-            WriteSourceInfo(datasetDir, sourceName, newSha, originalCsvPath);
+        } else if (!datasetDir.IsEmpty() && !newCrc.empty()) {
+            // The CSV just changed. Refresh the recorded CRC + size/mtime so
+            // reopening the edited file reuses this dataset (via the fast path)
+            // instead of re-importing it.
+            const FileStat st = StatFile(originalCsvPath);
+            WriteSourceInfo(datasetDir, sourceName, newCrc, originalCsvPath,
+                            st.size, st.mtime);
         }
     }
 
