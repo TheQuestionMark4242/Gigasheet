@@ -42,6 +42,7 @@
 #include "../storage/csv_importer.hpp"
 #include "../storage/memory_usage.hpp"
 #include "../model/mmapped_table.hpp"
+#include "../model/in_memory_table.hpp"
 namespace {
 
 const int kStatisticsToolId = wxID_HIGHEST + 1;
@@ -387,11 +388,6 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
         datasetDir = dir;
         originalCsvPath = OriginalCsvPathForDir(dir);
     }
-    SetBackgroundColour(kChromeBg);
-    CreateStatusBar();
-    SetStatusText(hasDataset ? "Loading..." : "No dataset open. Use Open to import a CSV.");
-
-    Bind(wxEVT_CLOSE_WINDOW, &SpreadsheetFrame::OnClose, this);
 
     if (hasDataset) {
         // Load the (possibly large) dataset behind a loading screen. mmap itself
@@ -411,6 +407,57 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     if (!table) {
         table = new MmappedTable(); // empty: window opens, no data shown
     }
+
+    BuildUi(table);
+
+    if (table->GetNumberCols() == 0) {
+        SetStatusText("No dataset open. Use Open to import a CSV.");
+    } else {
+        UpdateStatus();
+        ShowCellInFormulaBar(0, 0);
+    }
+}
+
+SpreadsheetFrame::SpreadsheetFrame(const wxString& csvPath, bool /*fromCsv*/)
+    : wxFrame(nullptr, wxID_ANY, "Gigasheet", wxDefaultPosition, wxSize(1000,700)) {
+    previewMode = true;
+    pendingCsvPath = csvPath;
+    sourceName = wxFileName(csvPath).GetFullName();
+
+    // Read the first rows now (cheap) so the window paints instantly. Every
+    // value is shown as a string until the background import infers real types.
+    CsvPreview pv;
+    try { pv = PreviewCsv(csvPath.ToStdString(), 100); } catch (...) {}
+
+    std::vector<wxString> labels;
+    labels.reserve(pv.headers.size());
+    for (const auto& h : pv.headers) labels.push_back(wxString::FromUTF8(h));
+    std::vector<std::vector<wxString>> rows;
+    rows.reserve(pv.rows.size());
+    for (const auto& r : pv.rows) {
+        std::vector<wxString> rr;
+        rr.reserve(r.size());
+        for (const auto& v : r) rr.push_back(wxString::FromUTF8(v));
+        rows.push_back(std::move(rr));
+    }
+    const std::size_t previewCount = rows.size();
+    auto* preview = new InMemoryTable(std::move(labels), std::move(rows));
+
+    BuildUi(preview);
+
+    grid->EnableEditing(false); // preview is read-only until the real data loads
+    SetTitle(sourceName + wxString::FromUTF8(" \xE2\x80\x94 Gigasheet"));
+    SetStatusText(wxString::Format(
+        "Loading %s - showing the first %zu rows while importing...",
+        sourceName, previewCount));
+
+    StartBackgroundLoad();
+}
+
+void SpreadsheetFrame::BuildUi(wxGridTableBase* initialTable) {
+    SetBackgroundColour(kChromeBg);
+    CreateStatusBar();
+    Bind(wxEVT_CLOSE_WINDOW, &SpreadsheetFrame::OnClose, this);
 
     // Dark chrome: the action row + formula bar sit on one dark panel; the grid
     // canvas stays light. Regions read by tone, not by borders.
@@ -466,7 +513,7 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
 
     // grid
     grid = new wxGrid(this, wxID_ANY);
-    grid->SetTable(table, true, wxGrid::wxGridSelectCells);
+    grid->SetTable(initialTable, true, wxGrid::wxGridSelectCells);
     grid->EnableEditing(true);
     StyleGrid();
 
@@ -480,10 +527,6 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
     });
     formulaBar->Bind(wxEVT_TEXT_ENTER, &SpreadsheetFrame::OnFormulaEnter, this);
 
-    UpdateStatus();
-    if (table->GetNumberRows() > 0 && table->GetNumberCols() > 0) {
-        ShowCellInFormulaBar(0, 0);
-    }
     memoryTimer.SetOwner(this);
 
     Bind(
@@ -535,6 +578,108 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& dir)
             }
             SetIcons(icons);
         }
+    }
+}
+
+SpreadsheetFrame::~SpreadsheetFrame() {
+    // Make sure the background loader is stopped before we're destroyed.
+    if (loaderThread.joinable()) {
+        loaderCancel.store(true);
+        loaderThread.join();
+    }
+}
+
+void SpreadsheetFrame::StartBackgroundLoad() {
+    loaderCancel.store(false);
+    loaderDone.store(false);
+    const wxString csvPath = pendingCsvPath;
+
+    loaderThread = std::thread([this, csvPath] {
+        std::string resultDir, err;
+        wxString importDir;
+        try {
+            const FileStat st = StatFile(csvPath);
+            const std::string crc = Crc32OfFile(csvPath);
+
+            // Reuse an existing dataset with the same contents; otherwise import
+            // the whole file (with full-file type inference).
+            const wxString existing = FindConvertedDirByCrc(csvPath, crc);
+            if (!existing.IsEmpty()) {
+                resultDir = existing.ToStdString();
+            } else {
+                importDir = MakeOutputDirectoryPath(csvPath);
+                ImportCsv(csvPath.ToStdString(), importDir.ToStdString(),
+                          &loaderCancel);
+                WriteSourceInfo(importDir, sourceName, crc, csvPath,
+                                st.size, st.mtime);
+                resultDir = importDir.ToStdString();
+            }
+        } catch (const ImportCancelled&) {
+            // Window closed mid-import: discard the partial output.
+            if (!importDir.IsEmpty()) {
+                std::error_code ec;
+                std::filesystem::remove_all(importDir.ToStdString(), ec);
+            }
+        } catch (const std::exception& ex) {
+            err = ex.what();
+        } catch (...) {
+            err = "Unknown error while importing.";
+        }
+        loaderResultDir = std::move(resultDir);
+        loaderError = std::move(err);
+        loaderDone.store(true, std::memory_order_release);
+    });
+
+    // Poll for completion on the GUI thread (avoids cross-thread widget access).
+    // A distinct timer id keeps these events off the memory-status timer's
+    // catch-all handler.
+    const int kLoadTimerId = wxID_HIGHEST + 50;
+    loadTimer.SetOwner(this, kLoadTimerId);
+    Bind(wxEVT_TIMER, &SpreadsheetFrame::OnLoadTimer, this, kLoadTimerId);
+    loadTimer.Start(120);
+}
+
+void SpreadsheetFrame::OnLoadTimer(wxTimerEvent&) {
+    if (!loaderDone.load(std::memory_order_acquire)) return;
+    loadTimer.Stop();
+    if (loaderThread.joinable()) loaderThread.join();
+    if (closing) return;
+    FinishBackgroundLoad();
+}
+
+void SpreadsheetFrame::FinishBackgroundLoad() {
+    if (!loaderError.empty()) {
+        wxMessageBox("Failed to import the CSV:\n" + wxString(loaderError),
+                     "Import Failed", wxICON_ERROR, this);
+        SetStatusText("Import failed - showing preview only.");
+        return;
+    }
+    if (loaderResultDir.empty()) return; // cancelled
+
+    const wxString dir = wxString::FromUTF8(loaderResultDir);
+    MmappedTable* real = nullptr;
+    try {
+        real = new MmappedTable(dir.ToStdString());
+    } catch (const std::exception& ex) {
+        wxMessageBox(wxString("Imported, but failed to open the dataset:\n") + ex.what(),
+                     "Open Failed", wxICON_ERROR, this);
+        return;
+    }
+
+    // Swap the preview out for the real, typed dataset.
+    previewMode = false;
+    datasetDir = dir;
+    originalCsvPath = OriginalCsvPathForDir(dir);
+    sourceName = OriginalNameForDir(dir);
+    table = real;
+    grid->AssignTable(real, wxGrid::wxGridSelectCells); // deletes the preview
+    grid->EnableEditing(true);
+    StyleGrid();
+    AutoSizeColumns(10);
+    grid->ForceRefresh();
+    UpdateStatus();
+    if (table->GetNumberRows() > 0 && table->GetNumberCols() > 0) {
+        ShowCellInFormulaBar(0, 0);
     }
 }
 
@@ -626,9 +771,12 @@ void SpreadsheetFrame::OnAppearance() {
 }
 
 void SpreadsheetFrame::AutoSizeColumns(int sampleRows) {
-    if (!grid || !table) return;
-    const int cols = table->GetNumberCols();
-    const int rows = std::min(sampleRows, table->GetNumberRows());
+    if (!grid) return;
+    // Size whichever table is currently shown (preview or real dataset).
+    wxGridTableBase* t = grid->GetTable();
+    if (!t) return;
+    const int cols = t->GetNumberCols();
+    const int rows = std::min(sampleRows, t->GetNumberRows());
     const int padding = grid->FromDIP(18); // left+right cell padding
 
     wxClientDC dc(grid);
@@ -637,11 +785,11 @@ void SpreadsheetFrame::AutoSizeColumns(int sampleRows) {
 
     for (int c = 0; c < cols; ++c) {
         dc.SetFont(labelFont);
-        int width = dc.GetTextExtent(table->GetColLabelValue(c)).GetWidth();
+        int width = dc.GetTextExtent(t->GetColLabelValue(c)).GetWidth();
 
         dc.SetFont(cellFont);
         for (int r = 0; r < rows; ++r) {
-            const int w = dc.GetTextExtent(table->GetValue(r, c)).GetWidth();
+            const int w = dc.GetTextExtent(t->GetValue(r, c)).GetWidth();
             if (w > width) width = w;
         }
         grid->SetColSize(c, width + padding);
@@ -661,6 +809,7 @@ void SpreadsheetFrame::OnGridSelectCell(wxGridEvent& event) {
 }
 
 void SpreadsheetFrame::OnFormulaEnter(wxCommandEvent&) {
+    if (!table) return; // preview is read-only
     const int row = grid->GetGridCursorRow();
     const int col = grid->GetGridCursorCol();
     if (row >= 0 && col >= 0) {
@@ -677,6 +826,7 @@ void SpreadsheetFrame::OnTimer(wxTimerEvent&) {
 }
 
 void SpreadsheetFrame::UpdateStatus() {
+    if (!table) return; // preview mode: the loading status is shown instead
     wxString rowsText;
     if (table->IsFiltered()) {
         rowsText = wxString::Format("Showing %d of %d rows",
@@ -717,100 +867,25 @@ void SpreadsheetFrame::OnOpenCsv(wxCommandEvent&) {
     }
 
     const wxString csvPath = dlg.GetPath();
-    const wxString csvName = wxFileName(csvPath).GetFullName();
-    std::uint64_t csvBytes = 0;
-    { std::error_code ec; csvBytes = std::filesystem::file_size(csvPath.ToStdString(), ec); }
+    const FileStat stat = StatFile(csvPath);
 
-    try {
-        const FileStat stat = StatFile(csvPath);
+    // Fast path: if a dataset's recorded size + mtime match the file exactly,
+    // it's unchanged since import - open the real dataset directly (no preview
+    // needed, mmap load is lazy and quick). Otherwise open progressively: show
+    // a preview immediately and import in the background.
+    const wxString existing = FindConvertedDirByStat(csvPath, stat);
+    SpreadsheetFrame* frame = existing.IsEmpty()
+        ? new SpreadsheetFrame(csvPath, /*fromCsv=*/true)
+        : new SpreadsheetFrame(existing);
+    frame->Show(true);
+    frame->Raise();
 
-        // Fast path: a dataset whose recorded size + mtime match this file
-        // exactly - it hasn't changed since import, so reuse it without reading
-        // the file or importing anything.
-        wxString outputDir = FindConvertedDirByStat(csvPath, stat);
-
-        if (!outputDir.IsEmpty()) {
-            SetStatusText("Already converted - opening " + outputDir);
-        } else {
-            // Size/mtime didn't identify it. Import speculatively *while* we
-            // CRC the file, so a first-time open overlaps the import with the
-            // checksum. If the CRC then matches an existing dataset (e.g. the
-            // file was copied/touched), cancel the import and reuse it.
-            const wxString importDir = MakeOutputDirectoryPath(csvPath);
-            std::atomic<bool> cancelImport{false};
-            std::exception_ptr importError;
-            std::thread importThread([&] {
-                try {
-                    ImportCsv(csvPath.ToStdString(), importDir.ToStdString(),
-                              &cancelImport);
-                } catch (const ImportCancelled&) {
-                    // Expected: the file turned out to be already converted.
-                } catch (...) {
-                    importError = std::current_exception();
-                }
-            });
-            // Ensure the worker is always stopped and joined, even if something
-            // below throws, so the std::thread never destructs while joinable.
-            struct Joiner {
-                std::thread& t; std::atomic<bool>& cancel;
-                ~Joiner() { if (t.joinable()) { cancel.store(true); t.join(); } }
-            } joiner{importThread, cancelImport};
-
-            std::string crc;
-            RunWithLoadingScreen(
-                this, "Opening",
-                wxString::Format("Checking %s (%s)", csvName, HumanSize(csvBytes)),
-                [&] { crc = Crc32OfFile(csvPath); });
-
-            const wxString existing = FindConvertedDirByCrc(csvPath, crc);
-            if (!existing.IsEmpty()) {
-                // Already converted: stop the speculative import and discard it.
-                cancelImport.store(true);
-                RunWithLoadingScreen(
-                    this, "Opening",
-                    wxString::Format("Opening %s (%s)", csvName, HumanSize(csvBytes)),
-                    [&] {
-                        importThread.join();
-                        std::error_code ec;
-                        std::filesystem::remove_all(importDir.ToStdString(), ec);
-                    });
-                outputDir = existing;
-                SetStatusText("Already converted - opening " + outputDir);
-            } else {
-                // Genuinely new file: wait for the (already running) import.
-                RunWithLoadingScreen(
-                    this, "Importing CSV",
-                    wxString::Format("Importing %s (%s)", csvName, HumanSize(csvBytes)),
-                    [&] { importThread.join(); });
-                if (importError) {
-                    std::error_code ec;
-                    std::filesystem::remove_all(importDir.ToStdString(), ec);
-                    std::rethrow_exception(importError);
-                }
-                WriteSourceInfo(importDir, csvName, crc, csvPath,
-                                stat.size, stat.mtime);
-                outputDir = importDir;
-            }
-        }
-
-        auto* frame = new SpreadsheetFrame(outputDir);
-        frame->Show(true);
-        frame->Raise();
-
-        // If this window had no file open (an empty launcher window), replace
-        // it with the newly loaded one instead of leaving an empty window
-        // behind. A window that already has a file loaded is kept, so opening
-        // another file gives you a second window.
-        if (datasetDir.IsEmpty()) {
-            Close();
-        }
-    }
-    catch (const std::exception& ex) {
-        wxMessageBox(
-            ex.what(),
-            "CSV Import Failed",
-            wxICON_ERROR | wxOK,
-            this);
+    // If this window was an empty launcher (no file, not itself loading a
+    // preview), replace it with the newly opened one instead of leaving it
+    // behind. A window with a file loaded is kept, so opening another file
+    // gives you a second window.
+    if (datasetDir.IsEmpty() && !previewMode) {
+        Close();
     }
 }
 
@@ -819,6 +894,10 @@ void SpreadsheetFrame::OnSave(wxCommandEvent&) {
 }
 
 bool SpreadsheetFrame::DoSave() {
+    if (!table) {
+        SetStatusText("Still loading the dataset - try again in a moment.");
+        return false;
+    }
     if (!table->HasUnsavedChanges()) {
         SetStatusText("No unsaved changes.");
         return true;
@@ -893,10 +972,21 @@ void SpreadsheetFrame::OnClose(wxCloseEvent& event) {
             return;
         }
     }
+    // Stop any background import and make sure a queued swap is ignored.
+    closing = true;
+    loadTimer.Stop();
+    if (loaderThread.joinable()) {
+        loaderCancel.store(true);
+        loaderThread.join();
+    }
     event.Skip();
 }
 
 void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
+    if (!table) {
+        SetStatusText("Still loading the dataset - try again in a moment.");
+        return;
+    }
     if (table->GetNumberCols() == 0) {
         SetStatusText("Open a dataset first (Open) before computing statistics.");
         return;
@@ -906,6 +996,10 @@ void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
 }
 
 void SpreadsheetFrame::OnToggleFiltering() {
+    if (!table) {
+        SetStatusText("Still loading the dataset - try again in a moment.");
+        return;
+    }
     if (table->GetNumberCols() == 0 && !table->FilteringEnabled()) {
         SetStatusText("Open a dataset first (Open) before filtering.");
         return;
@@ -942,6 +1036,7 @@ void SpreadsheetFrame::RefreshFilterMarkers() {
 }
 
 void SpreadsheetFrame::OnColumnLabelClick(wxGridEvent& event) {
+    if (!table) { event.Skip(); return; }
     if (!table->FilteringEnabled()) { event.Skip(); return; }
     const int col = event.GetCol();
     if (col < 0) { event.Skip(); return; } // row-label corner / row labels
@@ -950,7 +1045,7 @@ void SpreadsheetFrame::OnColumnLabelClick(wxGridEvent& event) {
 }
 
 void SpreadsheetFrame::RecomputeFiltersAfterEdit(int col) {
-    if (!table->IsFiltered()) return;
+    if (!table || !table->IsFiltered()) return;
     wxBusyCursor busy;
     table->RecomputeFiltersAfterEdit(col, grid);
     UpdateStatus();
@@ -1098,6 +1193,10 @@ void SpreadsheetFrame::ShowColumnFilterPopup(int col) {
 }
 
 void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
+    if (!table) {
+        SetStatusText("Still loading the dataset - try again in a moment.");
+        return;
+    }
     if (table->GetNumberCols() == 0) {
         SetStatusText("Open a dataset first (Open) before adding a derived column.");
         return;

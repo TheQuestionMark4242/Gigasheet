@@ -1,5 +1,8 @@
 #pragma once
 
+#include <atomic>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include <wx/wx.h>
@@ -10,9 +13,28 @@
 
 class SpreadsheetFrame : public wxFrame {
 public:
+    // Open a prepared dataset directory (or an empty window if it has no data).
     SpreadsheetFrame(const wxString& directory);
 
+    // Open a CSV progressively: paint a preview of its first rows immediately,
+    // then import + type-infer the full file in the background and swap in the
+    // real dataset when ready. The bool tag distinguishes this from the
+    // directory constructor above.
+    SpreadsheetFrame(const wxString& csvPath, bool fromCsv);
+
+    ~SpreadsheetFrame() override;
+
 private:
+    // Build the shared chrome (nav bar, formula bar, grid, timers, theme) around
+    // whichever table is shown first (preview or real).
+    void BuildUi(wxGridTableBase* initialTable);
+
+    // Kick off the background import of pendingCsvPath; a short timer polls for
+    // completion and then swaps the preview out for the real dataset.
+    void StartBackgroundLoad();
+    void OnLoadTimer(wxTimerEvent&);
+    void FinishBackgroundLoad();
+
     void OnOpenCsv(wxCommandEvent&);
     void OnSave(wxCommandEvent&);
     void OnAddColumn(wxCommandEvent&);
@@ -80,4 +102,15 @@ private:
     // Selected appearance preset (persisted next to the executable).
     wxString currentThemeName;
     wxString prefPath;
+
+    // -------- Progressive (preview -> full) load state --------
+    bool previewMode = false;      // true while showing the CSV preview
+    bool closing = false;          // set in OnClose so a late swap is skipped
+    wxString pendingCsvPath;       // CSV being imported in the background
+    wxTimer loadTimer;             // polls loaderDone on the GUI thread
+    std::thread loaderThread;      // does the import off the GUI thread
+    std::atomic<bool> loaderCancel{false};
+    std::atomic<bool> loaderDone{false};
+    std::string loaderResultDir;   // dataset dir produced by the loader
+    std::string loaderError;       // non-empty if the import failed
 };

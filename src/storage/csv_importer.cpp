@@ -20,7 +20,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr size_t kInferenceRows = 20;
 constexpr size_t kFlushRows = 1'000'000;
 
 std::string MakeColumnName(const std::vector<std::string>& headerRow, size_t col) {
@@ -40,7 +39,8 @@ std::array<char, 64> ToCharBuf(const std::string& text) {
 std::vector<ColumnType> InferTypes(
     csv::CSVReader& reader,
     size_t columnCount,
-    size_t maxSampleRows
+    size_t maxSampleRows,
+    const std::atomic<bool>* cancel = nullptr
 ) {
     std::vector<ColumnType> types(columnCount, ColumnType::CHARBUF);
     std::vector<bool> sawValue(columnCount, false);
@@ -67,6 +67,11 @@ std::vector<ColumnType> InferTypes(
             }
         }
         ++sampled;
+        // Inference now scans the whole file, so honour cancellation here too.
+        if (cancel && (sampled & 0xFFFF) == 0 &&
+            cancel->load(std::memory_order_relaxed)) {
+            throw ImportCancelled{};
+        }
     }
 
     for (size_t col = 0; col < columnCount; ++col) {
@@ -265,9 +270,12 @@ std::filesystem::path ImportCsv(
         throw std::runtime_error("CSV has no columns to import.");
     }
 
+    // Infer column types from the *entire* file, not just a small sample, so a
+    // stray non-numeric value late in a column can't cause a mistyped import.
     auto inferenceReader = csv::CSVReader(inputPath.string(), format);
-    const std::vector<ColumnType> types =
-        InferTypes(inferenceReader, headerRow.size(), kInferenceRows);
+    const std::vector<ColumnType> types = InferTypes(
+        inferenceReader, headerRow.size(),
+        std::numeric_limits<std::size_t>::max(), cancel);
 
     fs::create_directories(outputDir);
 
@@ -300,4 +308,23 @@ std::filesystem::path ImportCsv(
     WriteStatsFiles(outputDir, accumulators, totalRows);
 
     return outputDir;
+}
+
+CsvPreview PreviewCsv(const fs::path& inputPath, std::size_t maxRows) {
+    const csv::CSVFormat format = MakeFormat();
+    CsvPreview preview;
+
+    csv::CSVReader reader(inputPath.string(), format);
+    preview.headers = reader.get_col_names();
+
+    csv::CSVRow row;
+    std::size_t n = 0;
+    while (n < maxRows && reader.read_row(row)) {
+        std::vector<std::string> values;
+        values.reserve(row.size());
+        for (auto& field : row) values.push_back(field.get<std::string>());
+        preview.rows.push_back(std::move(values));
+        ++n;
+    }
+    return preview;
 }
