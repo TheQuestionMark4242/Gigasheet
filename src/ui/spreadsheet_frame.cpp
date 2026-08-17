@@ -9,6 +9,7 @@
 #include <wx/image.h>
 #include <wx/imagpng.h>
 #include <wx/iconbndl.h>
+#include <wx/thread.h> // wxThreadEvent, wxQueueEvent
 
 #include <algorithm>
 #include <atomic>
@@ -46,6 +47,10 @@
 namespace {
 
 const int kStatisticsToolId = wxID_HIGHEST + 1;
+// Own id for the memory-status timer (so its ticks route to OnTimer) and for
+// the "background load finished" thread event (routes to OnLoadDone).
+const int kMemoryTimerId = wxID_HIGHEST + 50;
+const int kLoadDoneId    = wxID_HIGHEST + 51;
 
 // Active palette. ApplyTheme() pushes these onto the widgets; ApplyPreset()
 // swaps in a named preset. Initialised to the default (Light) preset.
@@ -427,7 +432,7 @@ SpreadsheetFrame::SpreadsheetFrame(const wxString& csvPath, bool /*fromCsv*/)
     // Read the first rows now (cheap) so the window paints instantly. Every
     // value is shown as a string until the background import infers real types.
     CsvPreview pv;
-    try { pv = PreviewCsv(csvPath.ToStdString(), 100); } catch (...) {}
+    try { pv = PreviewCsv(csvPath.ToStdString(), 1000); } catch (...) {}
 
     std::vector<wxString> labels;
     labels.reserve(pv.headers.size());
@@ -527,13 +532,8 @@ void SpreadsheetFrame::BuildUi(wxGridTableBase* initialTable) {
     });
     formulaBar->Bind(wxEVT_TEXT_ENTER, &SpreadsheetFrame::OnFormulaEnter, this);
 
-    memoryTimer.SetOwner(this);
-
-    Bind(
-        wxEVT_TIMER,
-        &SpreadsheetFrame::OnTimer,
-        this);
-
+    memoryTimer.SetOwner(this, kMemoryTimerId);
+    Bind(wxEVT_TIMER, &SpreadsheetFrame::OnTimer, this, kMemoryTimerId);
     memoryTimer.Start(1000); // every second
 
     wxBoxSizer* s = new wxBoxSizer(wxVERTICAL);
@@ -591,7 +591,7 @@ SpreadsheetFrame::~SpreadsheetFrame() {
 
 void SpreadsheetFrame::StartBackgroundLoad() {
     loaderCancel.store(false);
-    loaderDone.store(false);
+    Bind(wxEVT_THREAD, &SpreadsheetFrame::OnLoadDone, this, kLoadDoneId);
     const wxString csvPath = pendingCsvPath;
 
     loaderThread = std::thread([this, csvPath] {
@@ -627,23 +627,16 @@ void SpreadsheetFrame::StartBackgroundLoad() {
         }
         loaderResultDir = std::move(resultDir);
         loaderError = std::move(err);
-        loaderDone.store(true, std::memory_order_release);
+        // Notify the frame on the GUI thread that the import is done. Posting
+        // the event happens-before the thread returns, so it's already queued
+        // by the time OnClose's join() (if any) returns.
+        wxQueueEvent(this, new wxThreadEvent(wxEVT_THREAD, kLoadDoneId));
     });
-
-    // Poll for completion on the GUI thread (avoids cross-thread widget access).
-    // A distinct timer id keeps these events off the memory-status timer's
-    // catch-all handler.
-    const int kLoadTimerId = wxID_HIGHEST + 50;
-    loadTimer.SetOwner(this, kLoadTimerId);
-    Bind(wxEVT_TIMER, &SpreadsheetFrame::OnLoadTimer, this, kLoadTimerId);
-    loadTimer.Start(120);
 }
 
-void SpreadsheetFrame::OnLoadTimer(wxTimerEvent&) {
-    if (!loaderDone.load(std::memory_order_acquire)) return;
-    loadTimer.Stop();
+void SpreadsheetFrame::OnLoadDone(wxThreadEvent&) {
     if (loaderThread.joinable()) loaderThread.join();
-    if (closing) return;
+    if (closing) return; // window is closing; skip the swap
     FinishBackgroundLoad();
 }
 
@@ -974,7 +967,6 @@ void SpreadsheetFrame::OnClose(wxCloseEvent& event) {
     }
     // Stop any background import and make sure a queued swap is ignored.
     closing = true;
-    loadTimer.Stop();
     if (loaderThread.joinable()) {
         loaderCancel.store(true);
         loaderThread.join();

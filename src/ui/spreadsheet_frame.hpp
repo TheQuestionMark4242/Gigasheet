@@ -29,10 +29,11 @@ private:
     // whichever table is shown first (preview or real).
     void BuildUi(wxGridTableBase* initialTable);
 
-    // Kick off the background import of pendingCsvPath; a short timer polls for
-    // completion and then swaps the preview out for the real dataset.
+    // Kick off the background import of pendingCsvPath. When it finishes the
+    // worker posts a wxThreadEvent back to this frame (OnLoadDone), which swaps
+    // the preview out for the real dataset on the GUI thread.
     void StartBackgroundLoad();
-    void OnLoadTimer(wxTimerEvent&);
+    void OnLoadDone(wxThreadEvent&);
     void FinishBackgroundLoad();
 
     void OnOpenCsv(wxCommandEvent&);
@@ -107,10 +108,8 @@ private:
     bool previewMode = false;      // true while showing the CSV preview
     bool closing = false;          // set in OnClose so a late swap is skipped
     wxString pendingCsvPath;       // CSV being imported in the background
-    wxTimer loadTimer;             // polls loaderDone on the GUI thread
     std::thread loaderThread;      // does the import off the GUI thread
     std::atomic<bool> loaderCancel{false};
-    std::atomic<bool> loaderDone{false};
     std::string loaderResultDir;   // dataset dir produced by the loader
     std::string loaderError;       // non-empty if the import failed
 };
