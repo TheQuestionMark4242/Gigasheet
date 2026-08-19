@@ -33,7 +33,7 @@ private:
     // worker posts a wxThreadEvent back to this frame (OnLoadDone), which swaps
     // the preview out for the real dataset on the GUI thread.
     void StartBackgroundLoad();
-    void OnLoadDone(wxThreadEvent&);
+    void OnLoadDone();
     void FinishBackgroundLoad();
 
     void OnOpenCsv(wxCommandEvent&);

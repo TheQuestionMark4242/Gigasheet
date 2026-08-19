@@ -47,10 +47,9 @@
 namespace {
 
 const int kStatisticsToolId = wxID_HIGHEST + 1;
-// Own id for the memory-status timer (so its ticks route to OnTimer) and for
-// the "background load finished" thread event (routes to OnLoadDone).
+// Own id for the memory-status timer so its ticks route to OnTimer (a catch-all
+// wxEVT_TIMER bind would be fragile if another timer were ever added).
 const int kMemoryTimerId = wxID_HIGHEST + 50;
-const int kLoadDoneId    = wxID_HIGHEST + 51;
 
 // Active palette. ApplyTheme() pushes these onto the widgets; ApplyPreset()
 // swaps in a named preset. Initialised to the default (Light) preset.
@@ -591,7 +590,6 @@ SpreadsheetFrame::~SpreadsheetFrame() {
 
 void SpreadsheetFrame::StartBackgroundLoad() {
     loaderCancel.store(false);
-    Bind(wxEVT_THREAD, &SpreadsheetFrame::OnLoadDone, this, kLoadDoneId);
     const wxString csvPath = pendingCsvPath;
 
     loaderThread = std::thread([this, csvPath] {
@@ -627,14 +625,13 @@ void SpreadsheetFrame::StartBackgroundLoad() {
         }
         loaderResultDir = std::move(resultDir);
         loaderError = std::move(err);
-        // Notify the frame on the GUI thread that the import is done. Posting
-        // the event happens-before the thread returns, so it's already queued
-        // by the time OnClose's join() (if any) returns.
-        wxQueueEvent(this, new wxThreadEvent(wxEVT_THREAD, kLoadDoneId));
+        // Hop back to the GUI thread to swap the table. CallAfter is safe to
+        // call from a worker thread and delivers on the main event loop.
+        CallAfter([this] { OnLoadDone(); });
     });
 }
 
-void SpreadsheetFrame::OnLoadDone(wxThreadEvent&) {
+void SpreadsheetFrame::OnLoadDone() {
     if (loaderThread.joinable()) loaderThread.join();
     if (closing) return; // window is closing; skip the swap
     FinishBackgroundLoad();
@@ -659,13 +656,17 @@ void SpreadsheetFrame::FinishBackgroundLoad() {
         return;
     }
 
-    // Swap the preview out for the real, typed dataset.
+    // Swap the preview out for the real, typed dataset. AssignTable() leaves the
+    // grid's cached row/column counts at the preview's size, so detach the
+    // preview first (SetTable(nullptr) deletes the owned preview) and then
+    // attach the real table, which makes wxGrid recompute its dimensions.
     previewMode = false;
     datasetDir = dir;
     originalCsvPath = OriginalCsvPathForDir(dir);
     sourceName = OriginalNameForDir(dir);
     table = real;
-    grid->AssignTable(real, wxGrid::wxGridSelectCells); // deletes the preview
+    grid->SetTable(nullptr);
+    grid->SetTable(real, true, wxGrid::wxGridSelectCells);
     grid->EnableEditing(true);
     StyleGrid();
     AutoSizeColumns(10);
@@ -984,6 +985,7 @@ void SpreadsheetFrame::OnStatistics(wxCommandEvent&) {
         return;
     }
     StatisticsDialog dlg(this, table, grid->GetGridCursorCol());
+    dlg.CentreOnScreen();
     dlg.ShowModal();
 }
 
@@ -1122,16 +1124,7 @@ void SpreadsheetFrame::ShowColumnFilterPopup(int col) {
     dlg.SetSizerAndFit(top);
     dlg.SetMinSize(wxSize(320, dlg.GetMinSize().y));
 
-    // Position the dialog just below the clicked column header, like a dropdown.
-    {
-        int colLeft = 0; // logical x of the column within the grid content
-        for (int c = 0; c < col; ++c) colLeft += grid->GetColSize(c);
-        const int scrolledX = grid->CalcScrolledPosition(
-            wxPoint(colLeft, 0)).x;
-        const wxPoint anchor = grid->GetGridColLabelWindow()->ClientToScreen(
-            wxPoint(scrolledX, grid->GetColLabelSize()));
-        dlg.Move(anchor);
-    }
+    dlg.CentreOnScreen();
 
     removeBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) { dlg.EndModal(wxID_REMOVE); });
     clearBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) { dlg.EndModal(wxID_CLEAR); });
@@ -1224,6 +1217,7 @@ void SpreadsheetFrame::OnAddColumn(wxCommandEvent&) {
     dlg.SetSize(wxSize(480, -1));
     formulaCtrl->SetFocus();
     formulaCtrl->SetInsertionPointEnd();
+    dlg.CentreOnScreen();
 
     if (dlg.ShowModal() == wxID_OK) {
         wxString expr = formulaCtrl->GetValue();
